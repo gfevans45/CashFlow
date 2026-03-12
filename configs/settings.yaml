@@ -50,6 +50,31 @@ prediction_market:
   kelly_fraction: 0.25  # Quarter-Kelly for safety
   max_open_positions: 5
 
+polymarket_longshot:
+  name: "longshot_hunter"
+  # Entry filters
+  max_entry_price: 0.10       # Only buy YES tokens below $0.10
+  min_entry_price: 0.01       # Skip dead/spam markets
+  min_model_prob: 0.15        # Our model must estimate >=15% true probability
+  min_edge: 0.05              # At least 5% edge (model_prob - market_price)
+  # Kelly position sizing
+  kelly_fraction: 0.25        # Quarter-Kelly (conservative)
+  max_bet_pct: 5.0            # Never risk more than 5% of bankroll on one event
+  min_bet_usd: 1.00           # Minimum $1 per position
+  max_bet_usd: 25.00          # Maximum $25 per position
+  # Portfolio limits
+  max_positions: 20           # Up to 20 concurrent longshots
+  max_per_category: 4         # Max 4 positions per category (diversification)
+  # Exit rules
+  take_profit_multiplier: 3.0 # Sell if token price triples
+  stop_loss_pct: 50.0         # Sell if token price drops 50%
+  # Arbitrage sources (for cross-platform edge detection)
+  arb_sources:
+    - "metaculus"              # Forecasting community estimates
+    - "manifold"               # Play-money prediction market
+    - "kalshi"                 # CFTC-regulated (same events, different prices)
+    - "pinnacle"               # Sharp sportsbook odds
+
 backtest:
   start_date: "2024-01-01"
   end_date: "2025-12-31"

@@ -12,6 +12,10 @@ from cashflow.strategies.prediction_market import (
     PredictionMarketStrategy,
     PredictionState,
 )
+from cashflow.strategies.polymarket_longshot import (
+    PolymarketLongshotStrategy,
+    LongshotPortfolio,
+)
 from cashflow.utils.risk import (
     kelly_criterion,
     half_kelly,
@@ -194,3 +198,144 @@ class TestPredictionStrategy:
         state.open_positions = [None] * 5
         contract = strategy.evaluate_event("test", 0.80, 0.50, state)
         assert contract is None
+
+
+# --- Polymarket Longshot Strategy Tests ---
+
+class TestPolymarketLongshot:
+    @pytest.fixture
+    def strategy(self):
+        return PolymarketLongshotStrategy({
+            "max_entry_price": 0.10,
+            "min_entry_price": 0.01,
+            "min_model_prob": 0.15,
+            "min_edge": 0.05,
+            "kelly_fraction": 0.25,
+            "max_bet_pct": 5.0,
+            "min_bet_usd": 1.0,
+            "max_bet_usd": 25.0,
+            "max_positions": 20,
+            "max_per_category": 4,
+        })
+
+    @pytest.fixture
+    def portfolio(self):
+        return LongshotPortfolio(capital=250.0)
+
+    def test_no_entry_price_too_high(self, strategy, portfolio):
+        pos = strategy.evaluate_market("m1", "Test?", "crypto", 0.15, 0.25, portfolio)
+        assert pos is None  # Price > max_entry_price
+
+    def test_no_entry_model_prob_too_low(self, strategy, portfolio):
+        pos = strategy.evaluate_market("m1", "Test?", "crypto", 0.05, 0.08, portfolio)
+        assert pos is None  # Model prob < min_model_prob
+
+    def test_no_entry_insufficient_edge(self, strategy, portfolio):
+        pos = strategy.evaluate_market("m1", "Test?", "crypto", 0.08, 0.12, portfolio)
+        assert pos is None  # Edge = 4% < 5% min
+
+    def test_entry_with_edge(self, strategy, portfolio):
+        # Market at $0.05, model says 20% = 15% edge
+        pos = strategy.evaluate_market("m1", "Test?", "crypto", 0.05, 0.20, portfolio)
+        assert pos is not None
+        assert pos.entry_price == 0.05
+        assert pos.model_prob == 0.20
+        assert pos.edge == 0.15
+        assert pos.total_cost >= 1.0  # At least minimum bet
+        assert pos.total_cost <= 25.0  # At most maximum bet
+        assert pos.num_contracts > 0
+        assert pos.max_payout > pos.total_cost  # Potential upside
+
+    def test_kelly_sizing_longshot(self, strategy):
+        # Longshot: buy at $0.05 with 20% true prob
+        kelly = strategy.kelly_for_binary(0.20, 0.05)
+        assert kelly > 0
+        # Full Kelly would be high for longshots, but we use 1/4
+        assert kelly < 0.10  # Fractional Kelly keeps it reasonable
+
+    def test_kelly_no_edge(self, strategy):
+        kelly = strategy.kelly_for_binary(0.05, 0.10)
+        assert kelly == 0.0  # No edge = no bet
+
+    def test_expected_value_positive(self, strategy):
+        # Buy at $0.05, true prob 20%, stake $10
+        ev = strategy.expected_value(0.20, 0.05, 10.0)
+        # EV = 0.20 * (200 * 0.95) - 0.80 * 10 = 0.20*190 - 8 = 38-8 = 30
+        assert ev > 0
+
+    def test_expected_value_negative(self, strategy):
+        ev = strategy.expected_value(0.03, 0.10, 10.0)
+        assert ev < 0  # True prob lower than market = negative EV
+
+    def test_settle_win(self, strategy, portfolio):
+        pos = strategy.evaluate_market("m1", "Test?", "crypto", 0.05, 0.20, portfolio)
+        assert pos is not None
+        strategy.open_position(pos, portfolio)
+        initial_invested = portfolio.total_invested
+
+        strategy.close_position(pos, outcome=True, portfolio=portfolio, reason="settled")
+        assert pos.pnl > 0
+        assert pos.exit_price == 1.0
+        assert not pos.is_open
+        # Portfolio should have gotten the payout
+        assert portfolio.capital > 250.0
+
+    def test_settle_loss(self, strategy, portfolio):
+        pos = strategy.evaluate_market("m1", "Test?", "crypto", 0.05, 0.20, portfolio)
+        assert pos is not None
+        cost = pos.total_cost
+        strategy.open_position(pos, portfolio)
+        assert portfolio.total_invested == cost
+
+        strategy.close_position(pos, outcome=False, portfolio=portfolio, reason="settled")
+        assert pos.pnl == -cost
+        assert pos.exit_price == 0.0
+        assert portfolio.capital < 250.0  # Lost the stake
+        assert portfolio.total_invested == 0  # Position closed
+
+    def test_category_diversification(self, strategy, portfolio):
+        # Fill up crypto category (max 4)
+        for i in range(4):
+            pos = strategy.evaluate_market(f"m{i}", "Test?", "crypto", 0.05, 0.25, portfolio)
+            if pos:
+                strategy.open_position(pos, portfolio)
+
+        # 5th crypto position should be rejected
+        pos = strategy.evaluate_market("m99", "Test?", "crypto", 0.05, 0.25, portfolio)
+        assert pos is None
+
+        # But a different category should still work
+        pos = strategy.evaluate_market("m100", "Test?", "sports", 0.05, 0.25, portfolio)
+        assert pos is not None
+
+    def test_max_positions_limit(self, strategy, portfolio):
+        strategy.max_positions = 3
+        for i in range(3):
+            pos = strategy.evaluate_market(f"m{i}", "Test?", f"cat{i}", 0.05, 0.25, portfolio)
+            if pos:
+                strategy.open_position(pos, portfolio)
+
+        pos = strategy.evaluate_market("m99", "Test?", "other", 0.05, 0.25, portfolio)
+        assert pos is None
+
+    def test_early_exit_take_profit(self, strategy, portfolio):
+        pos = strategy.evaluate_market("m1", "Test?", "crypto", 0.05, 0.20, portfolio)
+        assert pos is not None
+        strategy.open_position(pos, portfolio)
+
+        # Price more than tripled (use 0.16 to avoid float precision on 0.05*3.0)
+        exits = strategy.check_early_exits(portfolio, {"m1": 0.16})
+        assert len(exits) == 1
+        assert exits[0][2] == "take_profit"
+
+    def test_payoff_math(self, strategy, portfolio):
+        """Verify the core thesis: buy at $0.05, win pays 19:1."""
+        pos = strategy.evaluate_market("m1", "Test?", "crypto", 0.05, 0.20, portfolio)
+        assert pos is not None
+        contracts = pos.num_contracts
+        cost = pos.total_cost
+        # If YES wins, each contract pays $1.00
+        payout = contracts * 1.0
+        profit = payout - cost
+        # Profit should be ~19x the cost (buy at $0.05 = 20 contracts per $1)
+        assert profit / cost > 15  # At least 15:1 payoff ratio
