@@ -1,0 +1,57 @@
+# CashFlow Trading Bot Configuration
+general:
+  initial_capital: 500.00
+  max_risk_per_trade_pct: 2.0  # Max 2% of portfolio per trade
+  operating_cost_monthly: 0.0  # Cloud hosting etc (start at $0, scale later)
+  paper_trade: true  # ALWAYS start in paper mode
+
+stock_strategy:
+  name: "mean_reversion_momentum"
+  # Universe: liquid, low-spread ETFs and stocks suitable for $500 account
+  symbols:
+    - SPY   # S&P 500 ETF
+    - QQQ   # Nasdaq 100 ETF
+    - IWM   # Russell 2000 ETF
+    - AAPL
+    - MSFT
+    - NVDA
+    - AMD
+    - TSLA
+    - AMZN
+    - META
+  timeframe: "1Hour"
+  lookback_days: 90
+  # Mean reversion parameters
+  rsi_period: 14
+  rsi_oversold: 30
+  rsi_overbought: 70
+  bollinger_period: 20
+  bollinger_std: 2.0
+  # Momentum confirmation
+  ema_fast: 8
+  ema_slow: 21
+  volume_sma_period: 20
+  volume_threshold: 1.5  # Volume must be 1.5x average
+  # Risk management
+  stop_loss_pct: 2.0
+  take_profit_pct: 4.0
+  max_positions: 3
+  position_size_method: "kelly"  # kelly, fixed, equal_weight
+
+prediction_market:
+  name: "kalshi_event_trader"
+  # Focus on high-volume, data-driven event categories
+  categories:
+    - "economics"   # CPI, jobs, GDP - can model with public data
+    - "weather"     # Temperature, precipitation - NOAA data is free
+    - "finance"     # S&P 500 ranges, Fed rate decisions
+  max_position_size: 25.00  # Max $25 per event contract
+  min_edge_pct: 5.0  # Only trade when model sees 5%+ edge
+  kelly_fraction: 0.25  # Quarter-Kelly for safety
+  max_open_positions: 5
+
+backtest:
+  start_date: "2024-01-01"
+  end_date: "2025-12-31"
+  commission_pct: 0.0  # Alpaca is commission-free
+  slippage_pct: 0.05  # 5 basis points estimated slippage
