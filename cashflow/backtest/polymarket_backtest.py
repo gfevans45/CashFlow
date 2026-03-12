@@ -20,6 +20,11 @@ from cashflow.strategies.polymarket_longshot import (
     LongshotPortfolio,
     LongshotPosition,
 )
+from cashflow.data.arbitrage_feeds import (
+    ArbitrageEngine,
+    simulate_arbitrage_feeds,
+    ExternalProbability,
+)
 from cashflow.utils.risk import max_drawdown, sharpe_ratio, sortino_ratio
 
 
@@ -138,6 +143,7 @@ class PolymarketLongshotBacktester:
         days: int = 365,
         seed: int = 42,
         model_accuracy: float = 0.70,
+        use_arbitrage: bool = True,
     ) -> dict:
         """Run the backtest.
 
@@ -147,6 +153,7 @@ class PolymarketLongshotBacktester:
             seed: Random seed for reproducibility
             model_accuracy: How accurate our model is at estimating true_prob.
                            0.70 means our model estimate correlates ~70% with truth.
+            use_arbitrage: Whether to use cross-platform ensemble probabilities.
         """
         print("Generating simulated Polymarket longshot events...")
         events_df = generate_simulated_longshot_events(n_events, days, seed)
@@ -155,6 +162,19 @@ class PolymarketLongshotBacktester:
         print(f"  Avg market price: ${events_df['market_price'].mean():.4f}")
         print(f"  Actual win rate of longshots: {events_df['outcome'].mean():.1%}")
         print(f"  Model accuracy: {model_accuracy:.0%}")
+
+        # Generate cross-platform probability feeds for ensemble
+        arb_engine = ArbitrageEngine()
+        arb_feeds = {}
+        if use_arbitrage:
+            print("  Generating cross-platform probability feeds...")
+            sim_feeds = simulate_arbitrage_feeds(n_events=n_events, seed=seed + 200)
+            for feed in sim_feeds:
+                arb_feeds[feed["event_id"]] = feed["external_probs"]
+            print(f"  Loaded {len(arb_feeds)} cross-platform feeds (ensemble mode)")
+        else:
+            print("  Single-model mode (no cross-platform data)")
+
         print("-" * 60)
 
         portfolio = LongshotPortfolio(
@@ -167,14 +187,32 @@ class PolymarketLongshotBacktester:
 
         trades_evaluated = 0
         trades_taken = 0
+        ensemble_boosts = 0  # Track how often ensemble changed the decision
 
         # Process events chronologically
-        for _, event in events_df.iterrows():
-            # Simulate our model's probability estimate
-            # Model sees true_prob with some noise (imperfect model)
+        for idx, (_, event) in enumerate(events_df.iterrows()):
+            # Simulate our internal model's probability estimate
             noise = np.random.normal(0, (1 - model_accuracy) * 0.15)
-            model_prob = event["true_prob"] + noise
-            model_prob = np.clip(model_prob, 0.01, 0.95)
+            internal_model_prob = event["true_prob"] + noise
+            internal_model_prob = np.clip(internal_model_prob, 0.01, 0.95)
+
+            # Compute ensemble probability if arbitrage feeds available
+            if use_arbitrage and idx in arb_feeds:
+                external_probs = arb_feeds[idx]
+                ensemble_prob, confidence, source_count = (
+                    arb_engine.compute_ensemble_probability(
+                        external_probs, internal_model_prob
+                    )
+                )
+                # Use ensemble if we have enough sources and confidence
+                if source_count >= 2 and confidence >= 0.3:
+                    if abs(ensemble_prob - internal_model_prob) > 0.02:
+                        ensemble_boosts += 1
+                    model_prob = ensemble_prob
+                else:
+                    model_prob = internal_model_prob
+            else:
+                model_prob = internal_model_prob
 
             trades_evaluated += 1
 
@@ -225,6 +263,8 @@ class PolymarketLongshotBacktester:
 
         # Compute results
         print(f"\nEvaluated {trades_evaluated} events, took {trades_taken} positions")
+        if use_arbitrage:
+            print(f"  Ensemble overrode internal model {ensemble_boosts} times")
         return self._compute_results(portfolio, events_df)
 
     def _compute_results(self, portfolio: LongshotPortfolio, events_df: pd.DataFrame) -> dict:

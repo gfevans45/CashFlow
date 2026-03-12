@@ -98,7 +98,7 @@ def plot_all_strategies(stock_r, pred_r, poly_r, save_path="data/equity_curves.p
     plt.close()
 
 
-def run_polymarket_backtest(config):
+def run_polymarket_backtest(config, use_arbitrage=True):
     """Run the Polymarket longshot strategy backtest."""
     capital = config["general"]["initial_capital"]
     # Allocate 1/3 of capital to Polymarket
@@ -106,7 +106,10 @@ def run_polymarket_backtest(config):
 
     print(f"\n[Polymarket Longshot] Running backtest with ${poly_capital:.2f}...")
     bt = PolymarketLongshotBacktester(config, initial_capital=poly_capital)
-    results = bt.run(n_events=500, days=365, seed=42, model_accuracy=0.70)
+    results = bt.run(
+        n_events=500, days=365, seed=42,
+        model_accuracy=0.70, use_arbitrage=use_arbitrage,
+    )
     print_longshot_results(results)
     return results
 
@@ -117,6 +120,7 @@ def main():
     parser.add_argument("--prediction", action="store_true", help="Run Kalshi prediction market only")
     parser.add_argument("--polymarket", action="store_true", help="Run Polymarket longshot only")
     parser.add_argument("--plot", action="store_true", help="Generate charts")
+    parser.add_argument("--no-arb", action="store_true", help="Disable cross-platform arbitrage")
     parser.add_argument("--config", type=str, help="Path to config file")
     args = parser.parse_args()
 
@@ -135,7 +139,7 @@ def main():
         results = bt.run()
         print_results(results)
     elif args.polymarket:
-        results = run_polymarket_backtest(config)
+        results = run_polymarket_backtest(config, use_arbitrage=not args.no_arb)
         if args.plot and results:
             plot_all_strategies({}, {}, results)
     else:
@@ -164,7 +168,10 @@ def main():
         # Polymarket longshots
         print(f"\n[3/3] Polymarket Longshot Hunter...")
         poly_bt = PolymarketLongshotBacktester(config, initial_capital=third)
-        poly_r = poly_bt.run(n_events=500, days=365, seed=42, model_accuracy=0.70)
+        poly_r = poly_bt.run(
+            n_events=500, days=365, seed=42,
+            model_accuracy=0.70, use_arbitrage=not args.no_arb,
+        )
         print_longshot_results(poly_r)
 
         # Head-to-head comparison

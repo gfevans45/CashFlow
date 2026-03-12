@@ -16,6 +16,11 @@ from cashflow.strategies.polymarket_longshot import (
     PolymarketLongshotStrategy,
     LongshotPortfolio,
 )
+from cashflow.data.arbitrage_feeds import (
+    ArbitrageEngine,
+    ExternalProbability,
+    simulate_arbitrage_feeds,
+)
 from cashflow.utils.risk import (
     kelly_criterion,
     half_kelly,
@@ -339,3 +344,116 @@ class TestPolymarketLongshot:
         profit = payout - cost
         # Profit should be ~19x the cost (buy at $0.05 = 20 contracts per $1)
         assert profit / cost > 15  # At least 15:1 payoff ratio
+
+
+# --- Arbitrage Engine Tests ---
+
+class TestArbitrageEngine:
+    @pytest.fixture
+    def engine(self):
+        return ArbitrageEngine()
+
+    def _make_probs(self, probs_by_source):
+        """Helper to create ExternalProbability list from dict."""
+        return [
+            ExternalProbability(
+                source=source,
+                question="Test question",
+                probability=prob,
+                volume=5000.0,
+                confidence=ArbitrageEngine.SOURCE_WEIGHTS.get(source, 0.1),
+            )
+            for source, prob in probs_by_source.items()
+        ]
+
+    def test_ensemble_single_source(self, engine):
+        probs = self._make_probs({"metaculus": 0.20})
+        ensemble, confidence, count = engine.compute_ensemble_probability(probs)
+        assert abs(ensemble - 0.20) < 0.01
+        assert count == 1
+
+    def test_ensemble_multiple_sources(self, engine):
+        probs = self._make_probs({
+            "metaculus": 0.20,
+            "kalshi": 0.18,
+            "manifold": 0.22,
+        })
+        ensemble, confidence, count = engine.compute_ensemble_probability(probs)
+        assert 0.15 < ensemble < 0.25  # Weighted average in range
+        assert count == 3
+        assert confidence > 0
+
+    def test_ensemble_with_internal_model(self, engine):
+        probs = self._make_probs({"metaculus": 0.25, "kalshi": 0.20})
+        ensemble, _, count = engine.compute_ensemble_probability(probs, internal_model_prob=0.30)
+        # Internal model is 0.30, sources are 0.20-0.25, ensemble should be between
+        assert 0.18 < ensemble < 0.30
+        assert count == 2  # source_count doesn't include internal model
+
+    def test_ensemble_empty_sources(self, engine):
+        ensemble, confidence, count = engine.compute_ensemble_probability([])
+        assert ensemble == 0.5
+        assert confidence == 0.0
+        assert count == 0
+
+    def test_ensemble_internal_only(self, engine):
+        ensemble, _, count = engine.compute_ensemble_probability([], internal_model_prob=0.15)
+        assert abs(ensemble - 0.15) < 0.01
+        assert count == 0
+
+    def test_source_weights_exist(self):
+        expected = {"metaculus", "kalshi", "predictit", "manifold", "model"}
+        assert set(ArbitrageEngine.SOURCE_WEIGHTS.keys()) == expected
+
+    def test_metaculus_highest_weight(self):
+        weights = ArbitrageEngine.SOURCE_WEIGHTS
+        assert weights["metaculus"] >= max(
+            weights["kalshi"], weights["predictit"], weights["manifold"]
+        )
+
+    def test_volume_boost(self, engine):
+        # High volume should increase weight
+        high_vol = [ExternalProbability(
+            source="kalshi", question="Test", probability=0.30,
+            volume=50000.0, confidence=0.85,
+        )]
+        low_vol = [ExternalProbability(
+            source="kalshi", question="Test", probability=0.30,
+            volume=100.0, confidence=0.85,
+        )]
+        # Both should give same probability (single source)
+        e1, _, _ = engine.compute_ensemble_probability(high_vol, internal_model_prob=0.10)
+        e2, _, _ = engine.compute_ensemble_probability(low_vol, internal_model_prob=0.10)
+        # High volume source gets more weight, so ensemble closer to 0.30
+        assert e1 > e2
+
+    def test_question_similarity(self, engine):
+        sim = engine._question_similarity(
+            "Will Bitcoin hit 100k by 2025?",
+            "Bitcoin price above 100k in 2025",
+        )
+        assert sim > 0.3  # Should find overlap
+
+    def test_question_similarity_no_overlap(self, engine):
+        sim = engine._question_similarity(
+            "Will it rain tomorrow?",
+            "Bitcoin price prediction",
+        )
+        assert sim < 0.2
+
+    def test_simulate_arbitrage_feeds(self):
+        feeds = simulate_arbitrage_feeds(n_events=50, seed=123)
+        assert len(feeds) == 50
+        for feed in feeds:
+            assert "event_id" in feed
+            assert "true_prob" in feed
+            assert "external_probs" in feed
+            assert len(feed["external_probs"]) >= 2
+            for prob in feed["external_probs"]:
+                assert isinstance(prob, ExternalProbability)
+                assert 0.0 < prob.probability < 1.0
+
+    def test_extract_search_terms(self, engine):
+        terms = engine._extract_search_terms("Will Bitcoin hit $100k by 2025?")
+        assert len(terms) >= 1
+        assert any("bitcoin" in t.lower() for t in terms)
