@@ -1,8 +1,8 @@
 # CashFlow Trading Bot Configuration
 general:
-  initial_capital: 500.00
+  initial_capital: 50.00
   max_risk_per_trade_pct: 2.0  # Max 2% of portfolio per trade
-  operating_cost_monthly: 0.0  # Cloud hosting etc (start at $0, scale later)
+  operating_cost_monthly: 4.00  # DigitalOcean $4/mo droplet
   paper_trade: true  # ALWAYS start in paper mode
 
 stock_strategy:
@@ -60,10 +60,10 @@ polymarket_longshot:
   # Kelly position sizing
   kelly_fraction: 0.25        # Quarter-Kelly (conservative)
   max_bet_pct: 5.0            # Never risk more than 5% of bankroll on one event
-  min_bet_usd: 1.00           # Minimum $1 per position
-  max_bet_usd: 25.00          # Maximum $25 per position
+  min_bet_usd: 0.50           # Minimum $0.50 per position
+  max_bet_usd: 5.00           # Maximum $5 per position ($50 bankroll)
   # Portfolio limits
-  max_positions: 20           # Up to 20 concurrent longshots
+  max_positions: 15           # Up to 15 concurrent longshots
   max_per_category: 4         # Max 4 positions per category (diversification)
   # Exit rules
   take_profit_multiplier: 3.0 # Sell if token price triples

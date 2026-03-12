@@ -1,0 +1,30 @@
+[Unit]
+Description=CashFlow Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cashflow
+Group=cashflow
+WorkingDirectory=/opt/cashflow
+Environment=PYTHONPATH=/opt/cashflow
+EnvironmentFile=/opt/cashflow/.env
+ExecStart=/opt/cashflow/venv/bin/python run_live.py --capital 50 --interval 15
+Restart=on-failure
+RestartSec=60
+# Graceful shutdown (saves state)
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Resource limits (prevent runaway)
+MemoryMax=256M
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cashflow
+
+[Install]
+WantedBy=multi-user.target
