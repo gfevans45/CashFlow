@@ -272,29 +272,49 @@ class KalshiSportsClient(KalshiWeatherClient):
     KalshiWeatherClient. Only adds sports-specific fetching and parsing.
     """
 
-    # Series prefixes we actually want to trade (game-day contracts)
-    _TARGET_SERIES_PREFIXES = [
-        # Men's college basketball
+    # Exact series tickers for game-day contracts we want to trade.
+    # Be specific to avoid matching futures, drafts, awards, etc.
+    _TARGET_SERIES = {
+        # --- Men's College Basketball (game-day) ---
         "KXNCAAMBGAME", "KXNCAAMBTOTAL", "KXNCAAMBSPREAD",
-        "KXNCAAMB",  # catch other NCAAMB series (conference tournaments, etc.)
-        "KXMARMAD",  # March Madness
-        # NBA
-        "KXNBAGAME", "KXNBA1HTOTAL", "KXNBA2HTOTAL", "KXNBA3QTOTAL",
-        "KXNBA3QSPREAD", "KXNBAPTS", "KXNBAREB", "KXNBAAST",
-        "KXNBABLK", "KXNBASTL", "KXNBA",
-        # PGA / Golf
-        "KXPGATOUR", "KXPGAMAKECUT", "KXPGA3BALL", "KXPGAR2LEAD",
-        "KXPGAWINMARGIN", "KXPGA",
-        "KXMASTERS", "KXLIVTOP",
-        # NFL
-        "KXNFLGAME", "KXNFL1HTOTAL", "KXNFL2HTOTAL", "KXNFL1HSPREAD",
-        "KXNFL2HSPREAD", "KXNFL4QWINNER", "KXNFLWINMARGIN",
-        "KXNFLOT", "KXNFLREC", "KXNFL2TD", "KXNFL4DCONV",
-        "KXNFLLEADCHANGE", "KXNFLPRIMETIME", "KXNFL",
-        # College football
-        "KXNCAAFGAME", "KXNCAAFTEAMTOTAL", "KXNCAAFSPREAD",
-        "KXNCAAF",
-    ]
+        "KXNCAAMB1HWINNER",
+        # March Madness specials
+        "KXMARMAD", "KXMARMADROUND", "KXMARMADSEED",
+        "KXMARMADSEEDROUND", "KXMARMADSEEDWIN", "KXMARMAD1SEED",
+        "KXMARMAD3D", "KXMARMADSEEDDIF", "KXMARMADCONF",
+        # --- NBA (game-day) ---
+        "KXNBAGAME", "KXNBATOTAL", "KXNBASPREAD",
+        "KXNBAPTS", "KXNBAREB", "KXNBAAST", "KXNBA3PT",
+        "KXNBABLK", "KXNBASTL",
+        "KXNBAPA", "KXNBAPR", "KXNBARA", "KXNBAPRA",
+        "KXNBA1HTOTAL", "KXNBA2HTOTAL",
+        "KXNBA1HSPREAD", "KXNBA2HSPREAD",
+        "KXNBA1HWINNER", "KXNBA2HWINNER",
+        "KXNBA1QTOTAL", "KXNBA2QTOTAL", "KXNBA3QTOTAL", "KXNBA4QTOTAL",
+        "KXNBA1QSPREAD", "KXNBA2QSPREAD", "KXNBA3QSPREAD", "KXNBA4QSPREAD",
+        "KXNBA1QWINNER", "KXNBA2QWINNER", "KXNBA3QWINNER", "KXNBA4QWINNER",
+        # --- PGA / Golf (tournament-day) ---
+        "KXPGATOUR", "KXPGAMAKECUT", "KXPGA3BALL", "KXPGAH2H",
+        "KXPGAR1LEAD", "KXPGAR2LEAD",
+        "KXPGATOP5", "KXPGATOP10", "KXPGATOP20",
+        "KXPGAWINMARGIN", "KXPGAHOLEINONE", "KXPGAPLAYOFF",
+        "KXMASTERS", "KXMASTERSCUT",
+        "KXLIVTOP5", "KXLIVTOP10",
+        # --- NFL (game-day) ---
+        "KXNFLGAME", "KXNFLTOTAL", "KXNFLSPREAD",
+        "KXNFLTEAMTOTAL", "KXNFLWINMARGIN",
+        "KXNFL1HTOTAL", "KXNFL2HTOTAL",
+        "KXNFL1HSPREAD", "KXNFL2HSPREAD",
+        "KXNFL1HWINNER",
+        "KXNFL1QTOTAL", "KXNFL2QTOTAL", "KXNFL3QTOTAL", "KXNFL4QTOTAL",
+        "KXNFL4QWINNER", "KXNFL2QWINNER",
+        "KXNFLANYTD", "KXNFL2TD", "KXNFLNEXTTD", "KXNFLTEAMFIRSTTD",
+        "KXNFLGAMETD", "KXNFLGAMESACK", "KXNFLGAMEFG", "KXNFLGAMETO",
+        "KXNFLOT", "KXNFLREC", "KXNFLPASSYDS", "KXNFLPASSTDS",
+        # --- College Football (game-day) ---
+        "KXNCAAFGAME", "KXNCAAFSPREAD", "KXNCAAFTEAMTOTAL",
+        "KXNCAAF1HWINNER", "KXNCAAFD3GAME", "KXNCAAFCSGAME",
+    }
 
     def get_sports_events(self) -> list:
         """Fetch sports-related events from Kalshi.
@@ -316,7 +336,7 @@ class KalshiSportsClient(KalshiWeatherClient):
                 target_series = []
                 for s in all_series:
                     ticker = s.get("ticker", "")
-                    if any(ticker.startswith(p) for p in self._TARGET_SERIES_PREFIXES):
+                    if ticker in self._TARGET_SERIES:
                         target_series.append(s)
 
                 log.info(f"Found {len(target_series)} tradeable series "
