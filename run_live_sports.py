@@ -71,11 +71,11 @@ STATE_FILE = Path("data/sports_state.json")
 ET = ZoneInfo("America/New_York")
 
 # Scan interval (minutes) — sports odds change frequently
-SCAN_INTERVAL_MINUTES = 5
+SCAN_INTERVAL_MINUTES = 2
 
-# Active hours (Eastern) — only scan when games might be listed
-ACTIVE_START_HOUR = 9   # 9 AM ET
-ACTIVE_END_HOUR = 23    # 11 PM ET
+# Active hours (Eastern) — only scan when games are listed
+ACTIVE_START_HOUR = 10  # 10 AM ET
+ACTIVE_END_HOUR = 24    # Midnight ET (11:59 PM)
 
 # Supported sports
 SUPPORTED_SPORTS = ["nba", "ncaa", "mlb", "tennis", "soccer"]
@@ -595,22 +595,21 @@ class SportsTradingBot:
 def _is_active_hours() -> bool:
     """Check if we're within active scanning hours (Eastern)."""
     now = datetime.now(ET)
-    return ACTIVE_START_HOUR <= now.hour < ACTIVE_END_HOUR
+    end = ACTIVE_END_HOUR if ACTIVE_END_HOUR <= 23 else 24
+    return ACTIVE_START_HOUR <= now.hour < end
 
 
 def _seconds_until_active() -> float:
     """Seconds until the next active window opens."""
     now = datetime.now(ET)
-    if now.hour >= ACTIVE_END_HOUR:
+    if now.hour < ACTIVE_START_HOUR:
+        target = now.replace(hour=ACTIVE_START_HOUR, minute=0,
+                             second=0, microsecond=0)
+    else:
         # Past end — next active is tomorrow morning
         tomorrow = now + timedelta(days=1)
         target = tomorrow.replace(hour=ACTIVE_START_HOUR, minute=0,
                                   second=0, microsecond=0)
-    elif now.hour < ACTIVE_START_HOUR:
-        target = now.replace(hour=ACTIVE_START_HOUR, minute=0,
-                             second=0, microsecond=0)
-    else:
-        return 0  # Already active
     return max(0, (target - now).total_seconds())
 
 
