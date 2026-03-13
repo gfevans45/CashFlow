@@ -35,5 +35,7 @@ def get_kalshi_credentials() -> dict:
     return {
         "email": os.getenv("KALSHI_EMAIL", ""),
         "password": os.getenv("KALSHI_PASSWORD", ""),
-        "base_url": os.getenv("KALSHI_BASE_URL", "https://demo-api.kalshi.co"),
+        "api_key": os.getenv("KALSHI_API_KEY", ""),
+        "private_key_path": os.getenv("KALSHI_PRIVATE_KEY_PATH", ""),
+        "base_url": os.getenv("KALSHI_BASE_URL", "https://api.elections.kalshi.com/trade-api/v2"),
     }

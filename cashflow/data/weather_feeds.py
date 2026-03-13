@@ -317,12 +317,18 @@ class KalshiWeatherClient:
 
     @property
     def has_credentials(self) -> bool:
-        """Check if Kalshi credentials are available."""
+        """Check if Kalshi credentials are available (RSA key or email/password)."""
         creds = get_kalshi_credentials()
-        return bool(creds.get("email") and creds.get("password"))
+        has_rsa = bool(creds.get("api_key") and creds.get("private_key_path"))
+        has_email = bool(creds.get("email") and creds.get("password"))
+        return has_rsa or has_email
 
     def authenticate(self) -> bool:
-        """Authenticate with Kalshi API using email/password.
+        """Authenticate with Kalshi API.
+
+        Supports two auth methods:
+        1. RSA key-based auth (preferred, for live API)
+        2. Email/password (legacy, for demo API)
 
         Returns True if authentication succeeded.
         """
@@ -330,16 +336,109 @@ class KalshiWeatherClient:
             return True
 
         creds = get_kalshi_credentials()
+
+        # Try RSA key auth first
+        api_key = creds.get("api_key", "")
+        key_path = creds.get("private_key_path", "")
+
+        if api_key and key_path:
+            return self._auth_rsa(api_key, key_path)
+
+        # Fall back to email/password
         email = creds.get("email", "")
         password = creds.get("password", "")
 
-        if not email or not password:
-            log.warning("No Kalshi credentials found (KALSHI_EMAIL / KALSHI_PASSWORD)")
+        if email and password:
+            return self._auth_email(email, password, creds.get("base_url", ""))
+
+        log.warning("No Kalshi credentials found (KALSHI_API_KEY or KALSHI_EMAIL)")
+        return False
+
+    def _auth_rsa(self, api_key: str, key_path: str) -> bool:
+        """Authenticate using RSA private key signing."""
+        import base64
+        import hashlib
+        import calendar
+
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding, utils
+        except ImportError:
+            log.error("cryptography package required for RSA auth: pip install cryptography")
             return False
 
         try:
+            with open(key_path, "rb") as f:
+                private_key = serialization.load_pem_private_key(f.read(), password=None)
+        except Exception as e:
+            log.error(f"Failed to load RSA key from {key_path}: {e}")
+            return False
+
+        # Kalshi RSA auth: sign timestamp + method + path
+        timestamp_ms = str(int(datetime.utcnow().timestamp() * 1000))
+        method = "GET"
+        path = "/trade-api/v2/exchange/status"
+
+        message = timestamp_ms + method + path
+        signature = private_key.sign(
+            message.encode(),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+        sig_b64 = base64.b64encode(signature).decode()
+
+        # Set auth headers for all future requests
+        self.session.headers.update({
+            "KALSHI-ACCESS-KEY": api_key,
+            "KALSHI-ACCESS-SIGNATURE": sig_b64,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+        })
+
+        # Store key for re-signing requests
+        self._private_key = private_key
+        self._api_key = api_key
+
+        # Test the connection
+        try:
+            resp = self._get("/exchange/status")
+            if resp.status_code == 200:
+                self._authenticated = True
+                self._token_expiry = datetime.now() + timedelta(hours=20)
+                log.info("Kalshi RSA authentication successful")
+                return True
+            else:
+                log.error(f"Kalshi RSA auth test failed ({resp.status_code}): {resp.text[:200]}")
+                return False
+        except requests.RequestException as e:
+            log.error(f"Kalshi RSA auth test failed: {e}")
+            return False
+
+    def _sign_request(self, method: str, path: str) -> dict:
+        """Sign a request with RSA key. Returns headers dict."""
+        import base64
+
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        timestamp_ms = str(int(datetime.utcnow().timestamp() * 1000))
+        message = timestamp_ms + method.upper() + path
+        signature = self._private_key.sign(
+            message.encode(),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+        return {
+            "KALSHI-ACCESS-KEY": self._api_key,
+            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+        }
+
+    def _auth_email(self, email: str, password: str, base_url: str = "") -> bool:
+        """Authenticate using email/password (demo API)."""
+        url = base_url or self.BASE_URL
+        try:
             resp = self.session.post(
-                f"{self.BASE_URL}/login",
+                f"{url}/login",
                 json={"email": email, "password": password},
                 timeout=self.timeout,
             )
@@ -351,18 +450,25 @@ class KalshiWeatherClient:
             self._token = data.get("token", "")
             if self._token:
                 self.session.headers["Authorization"] = f"Bearer {self._token}"
-                # Token typically valid for ~24 hours; refresh at 20 hours
                 self._token_expiry = datetime.now() + timedelta(hours=20)
                 self._authenticated = True
-                log.info("Kalshi authentication successful")
+                log.info("Kalshi email authentication successful")
                 return True
             else:
                 log.error("Kalshi auth response missing token")
                 return False
-
         except requests.RequestException as e:
             log.error(f"Kalshi auth request failed: {e}")
             return False
+
+    def _get(self, path: str, params: dict = None) -> requests.Response:
+        """Make a GET request, signing with RSA if using key auth."""
+        url = f"{self.BASE_URL}{path}"
+        if hasattr(self, "_private_key"):
+            headers = self._sign_request("GET", f"/trade-api/v2{path}")
+            return self.session.get(url, params=params, headers=headers,
+                                    timeout=self.timeout)
+        return self.session.get(url, params=params, timeout=self.timeout)
 
     def get_weather_events(self) -> list:
         """Fetch weather-related events from Kalshi.
@@ -378,11 +484,7 @@ class KalshiWeatherClient:
                 "limit": 100,
                 "status": "open",
             }
-            resp = self.session.get(
-                f"{self.BASE_URL}/events",
-                params=params,
-                timeout=self.timeout,
-            )
+            resp = self._get("/events", params=params)
             if resp.status_code != 200:
                 log.error(f"Kalshi events failed ({resp.status_code}): {resp.text[:200]}")
                 return []
@@ -455,11 +557,7 @@ class KalshiWeatherClient:
             if event_ticker:
                 params["event_ticker"] = event_ticker
 
-            resp = self.session.get(
-                f"{self.BASE_URL}/markets",
-                params=params,
-                timeout=self.timeout,
-            )
+            resp = self._get("/markets", params=params)
             if resp.status_code != 200:
                 log.debug(f"Kalshi markets fetch failed ({resp.status_code})")
                 return []
@@ -555,10 +653,7 @@ class KalshiWeatherClient:
         Returns price as 0.0-1.0, or None if unavailable.
         """
         try:
-            resp = self.session.get(
-                f"{self.BASE_URL}/markets/{ticker}",
-                timeout=self.timeout,
-            )
+            resp = self._get(f"/markets/{ticker}")
             if resp.status_code != 200:
                 return None
 
