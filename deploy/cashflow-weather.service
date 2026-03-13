@@ -1,0 +1,30 @@
+[Unit]
+Description=CashFlow Weather Trading Bot (Kalshi Temperature Contracts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cashflow
+Group=cashflow
+WorkingDirectory=/opt/cashflow
+Environment=PYTHONPATH=/opt/cashflow
+EnvironmentFile=/opt/cashflow/.env
+ExecStart=/opt/cashflow/venv/bin/python run_live_weather.py --capital 50 --cities NYC CHI AUS
+Restart=on-failure
+RestartSec=60
+# Graceful shutdown (saves state before exit)
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Resource limits (prevent runaway)
+MemoryMax=256M
+CPUQuota=25%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cashflow-weather
+
+[Install]
+WantedBy=multi-user.target
