@@ -275,60 +275,114 @@ class KalshiSportsClient(KalshiWeatherClient):
     def get_sports_events(self) -> list:
         """Fetch sports-related events from Kalshi.
 
-        Searches events by category and keyword filtering for sports.
-        Returns raw event dicts from the Kalshi API.
+        Strategy:
+          1. Use /series?category=Sports to find sports series tickers
+          2. Fetch events for each sports series
+          3. Also paginate through all events to catch anything miscategorized
+          4. Deduplicate and filter
         """
+        seen = set()
+        sports_events = []
+
+        # --- Method 1: Series-based discovery (most reliable) ---
         try:
-            all_events = []
-            # Fetch with category filter if API supports it
-            for category in ["sports", "entertainment"]:
-                params = {"limit": 200, "status": "open"}
-                try:
-                    resp = self._get("/events", params=params)
-                    if resp.status_code == 200:
-                        events = resp.json().get("events", [])
-                        all_events.extend(events)
-                        break  # Got all events, filter below
-                except Exception:
-                    continue
+            series_resp = self._get("/series", params={"category": "Sports"})
+            if series_resp.status_code == 200:
+                series_list = series_resp.json().get("series", [])
+                log.info(f"Found {len(series_list)} sports series via /series?category=Sports")
+                for s in series_list:
+                    series_ticker = s.get("ticker", "")
+                    if not series_ticker:
+                        continue
+                    log.info(f"  Series: {series_ticker} — {s.get('title', '')[:60]}")
+                    try:
+                        params = {
+                            "series_ticker": series_ticker,
+                            "status": "open",
+                            "limit": 200,
+                            "with_nested_markets": "true",
+                        }
+                        resp = self._get("/events", params=params)
+                        if resp.status_code == 200:
+                            events = resp.json().get("events", [])
+                            for event in events:
+                                ticker = event.get("event_ticker", "")
+                                if ticker and ticker not in seen:
+                                    seen.add(ticker)
+                                    sports_events.append(event)
+                        time.sleep(0.15)
+                    except Exception as e:
+                        log.debug(f"  Failed to fetch events for series {series_ticker}: {e}")
+            else:
+                log.warning(f"Series endpoint returned {series_resp.status_code}")
+        except Exception as e:
+            log.warning(f"Series-based discovery failed: {e}")
 
-            # Deduplicate by event_ticker
-            seen = set()
-            unique = []
-            for event in all_events:
-                ticker = event.get("event_ticker", "")
-                if ticker not in seen:
-                    seen.add(ticker)
-                    unique.append(event)
+        # --- Method 2: Paginate all events, filter for sports ---
+        try:
+            cursor = ""
+            pages = 0
+            max_pages = 5  # Safety limit (5 * 200 = 1000 events max)
+            while pages < max_pages:
+                params = {"limit": 200, "status": "open",
+                          "with_nested_markets": "true"}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = self._get("/events", params=params)
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                events = data.get("events", [])
+                if not events:
+                    break
+                for event in events:
+                    ticker = event.get("event_ticker", "")
+                    if ticker and ticker not in seen and self._is_sports_event(event):
+                        seen.add(ticker)
+                        sports_events.append(event)
+                cursor = data.get("cursor", "")
+                if not cursor:
+                    break
+                pages += 1
+                time.sleep(0.15)
+            log.info(f"Paginated {pages + 1} pages of events")
+        except Exception as e:
+            log.warning(f"Paginated event scan failed: {e}")
 
-            # Log categories for debugging
-            categories = {}
-            for event in unique:
-                cat = event.get("category", "unknown")
-                categories[cat] = categories.get(cat, 0) + 1
-            log.info(f"Kalshi event categories: {dict(sorted(categories.items(), key=lambda x: -x[1]))}")
-
-            # Filter for sports
-            sports_events = []
-            for event in unique:
-                if self._is_sports_event(event):
-                    sports_events.append(event)
-
-            log.info(f"Found {len(sports_events)} sports events out of "
-                     f"{len(unique)} total events")
-            return sports_events
-
-        except requests.RequestException as e:
-            log.error(f"Kalshi sports events fetch failed: {e}")
-            return []
+        log.info(f"Total sports events found: {len(sports_events)}")
+        for ev in sports_events:
+            nested = ev.get("markets", [])
+            log.info(f"  Event: {ev.get('event_ticker', '')} — "
+                     f"{ev.get('title', '')[:60]} "
+                     f"({len(nested)} nested markets)")
+        return sports_events
 
     def _is_sports_event(self, event: dict) -> bool:
-        """Determine if an event is sports-related."""
+        """Determine if an event is a tradeable sports game/match.
+
+        Filters OUT long-term speculative questions (ownership, expansion,
+        political events) that happen to mention sports keywords.
+        """
         ticker = event.get("event_ticker", "").upper()
         title = event.get("title", "").lower()
         category = event.get("category", "").lower()
         sub_title = event.get("sub_title", "").lower()
         text = f"{title} {sub_title}"
+
+        # Reject non-sports categories that matched on keywords
+        non_sports = {"politics", "elections", "world", "social",
+                      "science and technology", "companies"}
+        if category in non_sports:
+            return False
+
+        # Reject long-term speculative questions (not game contracts)
+        speculation_phrases = [
+            "owner", "bought", "franchise", "approve", "before 20",
+            "expansion", "relocat", "senate", "democrat", "republican",
+            "election", "vote", "congress", "president",
+        ]
+        if any(phrase in text for phrase in speculation_phrases):
+            return False
 
         # Category check (Kalshi uses these category strings)
         sports_categories = {
@@ -343,7 +397,6 @@ class KalshiSportsClient(KalshiWeatherClient):
             return True
 
         # Keyword check — require at least 2 keyword hits to reduce false positives
-        # on events like "Will Britain win..." or "Johnny Depp casted..."
         for sport, keywords in _SPORT_KEYWORDS.items():
             hits = sum(1 for kw in keywords if kw in text)
             if hits >= 2:
@@ -377,11 +430,16 @@ class KalshiSportsClient(KalshiWeatherClient):
         else:
             events = self.get_sports_events()
             for event in events:
-                ticker = event.get("event_ticker", "")
-                if ticker:
-                    markets = self._fetch_sports_markets(event_ticker=ticker)
-                    raw_markets.extend(markets)
-                    time.sleep(0.2)  # Rate limit
+                # Use nested markets if available (saves API calls)
+                nested = event.get("markets", [])
+                if nested:
+                    raw_markets.extend(nested)
+                else:
+                    ticker = event.get("event_ticker", "")
+                    if ticker:
+                        markets = self._fetch_sports_markets(event_ticker=ticker)
+                        raw_markets.extend(markets)
+                        time.sleep(0.2)  # Rate limit
 
         # Parse into structured objects
         parsed = []
@@ -452,31 +510,35 @@ class KalshiSportsClient(KalshiWeatherClient):
         # Detect contract type and parse details
         contract_type, details = self._classify_contract(text)
 
-        # Parse prices (Kalshi returns cents 0-100)
-        yes_price = float(data.get("yes_price", 0) or 0)
-        no_price = float(data.get("no_price", 0) or 0)
-        if yes_price > 1:
-            yes_price /= 100.0
-        if no_price > 1:
-            no_price /= 100.0
+        # Parse prices — Kalshi API v2 uses _dollars fields (string, e.g. "0.56")
+        yes_price = self._parse_dollar_field(data, [
+            "yes_price_dollars", "yes_price",
+        ])
+        no_price = self._parse_dollar_field(data, [
+            "no_price_dollars", "no_price",
+        ])
 
-        # Fallback pricing
+        # Fallback: last traded price
         if yes_price == 0:
-            last = float(data.get("last_price", 0) or 0)
-            if last > 1:
-                yes_price = last / 100.0
-            elif last > 0:
-                yes_price = last
+            yes_price = self._parse_dollar_field(data, [
+                "last_price_dollars", "last_price",
+                "previous_price_dollars", "previous_yes_price",
+            ])
 
+        # Fallback: mid of bid/ask
         if yes_price == 0:
-            yes_bid = float(data.get("yes_bid", 0) or 0)
-            yes_ask = float(data.get("yes_ask", 0) or 0)
-            if yes_bid > 1:
-                yes_bid /= 100.0
-            if yes_ask > 1:
-                yes_ask /= 100.0
+            yes_bid = self._parse_dollar_field(data, [
+                "yes_bid_dollars", "yes_bid",
+            ])
+            yes_ask = self._parse_dollar_field(data, [
+                "yes_ask_dollars", "yes_ask",
+            ])
             if yes_bid > 0 and yes_ask > 0:
                 yes_price = (yes_bid + yes_ask) / 2.0
+            elif yes_bid > 0:
+                yes_price = yes_bid
+            elif yes_ask > 0:
+                yes_price = yes_ask
 
         if no_price == 0 and yes_price > 0:
             no_price = round(1.0 - yes_price, 4)
@@ -515,6 +577,25 @@ class KalshiSportsClient(KalshiWeatherClient):
             event_ticker=event_ticker,
             raw=data,
         )
+
+    @staticmethod
+    def _parse_dollar_field(data: dict, field_names: list) -> float:
+        """Parse a price from Kalshi's _dollars fields (string like '0.56')
+        or legacy integer fields (cents 0-100). Returns float 0.0-1.0."""
+        for name in field_names:
+            val = data.get(name)
+            if val is None or val == "":
+                continue
+            try:
+                f = float(val)
+                # Legacy cents format (integers > 1)
+                if f > 1.0:
+                    f /= 100.0
+                if f > 0:
+                    return round(f, 6)
+            except (ValueError, TypeError):
+                continue
+        return 0.0
 
     def _detect_sport(self, text: str, ticker: str, data: dict) -> str:
         """Detect which sport a contract belongs to."""
