@@ -750,10 +750,15 @@ class KalshiSportsClient(KalshiWeatherClient):
             api_path = "/trade-api/v2/portfolio/orders"
             body_str = _json.dumps(payload, separators=(",", ":"))
             timestamp_ms = str(int(datetime.utcnow().timestamp() * 1000))
-            # Kalshi v2 POST signing: timestamp + method + path + body
-            message = timestamp_ms + "POST" + api_path + body_str
+            # Kalshi v2 signing: timestamp + method + path (body NOT included)
+            message = timestamp_ms + "POST" + api_path
             signature = self._private_key.sign(
-                message.encode(), padding.PKCS1v15(), hashes.SHA256(),
+                message.encode(),
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.DIGEST_LENGTH,
+                ),
+                hashes.SHA256(),
             )
             headers = {
                 "KALSHI-ACCESS-KEY": self._api_key,
@@ -761,7 +766,6 @@ class KalshiSportsClient(KalshiWeatherClient):
                 "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
                 "Content-Type": "application/json",
             }
-            # Send the exact same body string used in signing
             resp = self.session.post(url, data=body_str, headers=headers,
                                      timeout=self.timeout)
             if resp.status_code in (200, 201):
