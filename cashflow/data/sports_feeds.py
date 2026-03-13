@@ -268,9 +268,33 @@ _SPORTS_TICKER_PREFIXES = [
 class KalshiSportsClient(KalshiWeatherClient):
     """Kalshi client specialized for sports contracts.
 
-    Inherits RSA auth, _get(), _sign_request(), and authenticate() from
-    KalshiWeatherClient. Only adds sports-specific fetching and parsing.
+    Inherits RSA auth, _get(), and authenticate() from KalshiWeatherClient.
+    Overrides _sign_request() to use RSA-PSS (required by Kalshi v2 for
+    authenticated endpoints like /portfolio/*).
     """
+
+    def _sign_request(self, method: str, path: str) -> dict:
+        """Sign a request with RSA-PSS. Returns headers dict."""
+        import base64
+
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        timestamp_ms = str(int(datetime.utcnow().timestamp() * 1000))
+        message = timestamp_ms + method.upper() + path
+        signature = self._private_key.sign(
+            message.encode(),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        return {
+            "KALSHI-ACCESS-KEY": self._api_key,
+            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+        }
 
     # Exact series tickers for game-day contracts we want to trade.
     # Be specific to avoid matching futures, drafts, awards, etc.
