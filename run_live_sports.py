@@ -221,26 +221,83 @@ class SportsTradingBot:
                                ) -> list[tuple[SportsContract, float]]:
         """Compute model probabilities for each contract.
 
-        Fetches player/team stats as needed and dispatches to the
-        appropriate sub-model via the strategy.
+        Pre-filters contracts to tradeable price range before fetching
+        stats, and batch-prefetches unique player/team stats to minimize
+        API calls (balldontlie.io has a 60 req/min rate limit).
 
         Returns list of (contract, model_probability) tuples.
         """
-        results = []
         stats_api_available = self.nba_stats.available
 
+        # Step 1: Split into NBA contracts needing stats vs others
+        nba_tradeable = []
+        non_nba_results = []
+
         for contract in contracts:
+            # Non-NBA contracts don't need balldontlie — compute immediately
+            if contract.sport != "nba":
+                try:
+                    prob = self._compute_single_probability(
+                        contract, stats_api_available=False,
+                    )
+                    non_nba_results.append((contract, prob))
+                except Exception as e:
+                    log.debug(f"Failed to compute prob for {contract.ticker}: {e}")
+                    non_nba_results.append((contract, 0.5))
+                continue
+
+            # Pre-filter NBA: skip contracts outside tradeable price range
+            if not (0.20 <= contract.yes_price <= 0.80):
+                non_nba_results.append((contract, 0.5))
+                continue
+
+            nba_tradeable.append(contract)
+
+        log.info(f"  Pre-filtered: {len(nba_tradeable)} NBA contracts in "
+                 f"tradeable range, {len(non_nba_results)} others (no stats needed)")
+
+        # Step 2: Batch-prefetch unique NBA players and teams
+        if stats_api_available and nba_tradeable:
+            unique_players = set()
+            unique_teams = set()
+            for c in nba_tradeable:
+                if c.contract_type == "player_prop" and c.player_name:
+                    unique_players.add(c.player_name)
+                if c.team_a:
+                    unique_teams.add(c.team_a)
+                if c.team_b:
+                    unique_teams.add(c.team_b)
+
+            log.info(f"  Prefetching stats: {len(unique_players)} players, "
+                     f"{len(unique_teams)} teams")
+
+            for name in unique_players:
+                try:
+                    self.nba_stats.get_player_stats(name)
+                except Exception as e:
+                    log.debug(f"  Prefetch failed for player {name}: {e}")
+
+            for name in unique_teams:
+                try:
+                    self.nba_stats.get_team_stats(name)
+                except Exception as e:
+                    log.debug(f"  Prefetch failed for team {name}: {e}")
+
+            log.info("  Stats prefetch complete")
+
+        # Step 3: Compute probabilities for NBA contracts (cache hits, no API calls)
+        nba_results = []
+        for contract in nba_tradeable:
             try:
                 prob = self._compute_single_probability(
                     contract, stats_api_available,
                 )
-                results.append((contract, prob))
+                nba_results.append((contract, prob))
             except Exception as e:
                 log.debug(f"Failed to compute prob for {contract.ticker}: {e}")
-                # Use neutral probability as fallback
-                results.append((contract, 0.5))
+                nba_results.append((contract, 0.5))
 
-        return results
+        return non_nba_results + nba_results
 
     def _compute_single_probability(self, contract: SportsContract,
                                      stats_available: bool) -> float:

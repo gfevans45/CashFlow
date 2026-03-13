@@ -796,13 +796,26 @@ class NBAStatsClient:
             self.session.headers["Authorization"] = self.api_key
         self._player_cache: dict = {}
         self._team_cache: dict = {}
+        self._stats_cache: dict = {}  # player_name -> PlayerStats
+        self._team_stats_cache: dict = {}  # team_name -> TeamStats
+        self._teams_list: Optional[list] = None  # cached teams list
+        self._last_request_time: float = 0.0
+        self._min_request_interval: float = 1.1  # seconds between requests (< 60/min)
 
     @property
     def available(self) -> bool:
         return bool(self.api_key)
 
+    def _throttle(self):
+        """Enforce rate limit by sleeping between requests."""
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._min_request_interval:
+            time.sleep(self._min_request_interval - elapsed)
+        self._last_request_time = time.time()
+
     def _get(self, path: str, params: dict = None) -> Optional[dict]:
         """Make a GET request to balldontlie API."""
+        self._throttle()
         try:
             resp = self.session.get(
                 f"{self.BASE_URL}{path}",
@@ -879,7 +892,11 @@ class NBAStatsClient:
 
         This is the main method used by the strategy. Returns a PlayerStats
         object with everything needed for the player prop model.
+        Results are cached per player name to avoid duplicate API calls.
         """
+        if player_name in self._stats_cache:
+            return self._stats_cache[player_name]
+
         player = self.search_player(player_name)
         if not player:
             log.debug(f"Player not found: {player_name}")
@@ -913,7 +930,7 @@ class NBAStatsClient:
         recent_reb = reb_list[:10]
         recent_ast = ast_list[:10]
 
-        return PlayerStats(
+        stats = PlayerStats(
             player_id=player_id,
             name=player_name,
             team=team_name,
@@ -930,20 +947,28 @@ class NBAStatsClient:
             recent_ast_avg=round(sum(recent_ast) / len(recent_ast), 2) if recent_ast else averages.get("ast", 0.0),
             recent_games=len(recent_pts),
         )
+        self._stats_cache[player_name] = stats
+        return stats
 
     def get_teams(self) -> list[dict]:
-        """Fetch all NBA teams."""
+        """Fetch all NBA teams (cached after first call)."""
+        if self._teams_list is not None:
+            return self._teams_list
         data = self._get("/teams", params={"per_page": 30})
         if not data:
             return []
-        return data.get("data", [])
+        self._teams_list = data.get("data", [])
+        return self._teams_list
 
     def get_team_stats(self, team_name: str, season: int = None) -> Optional[TeamStats]:
         """Get team-level stats for game models.
 
         Since balldontlie doesn't directly expose team-level aggregates,
-        we approximate from recent games.
+        we approximate from recent games. Results are cached per team name.
         """
+        if team_name in self._team_stats_cache:
+            return self._team_stats_cache[team_name]
+
         if season is None:
             season = datetime.now().year if datetime.now().month >= 10 else datetime.now().year - 1
 
@@ -1030,7 +1055,7 @@ class NBAStatsClient:
         avg_for = sum(pts_for) / len(pts_for) if pts_for else 110.0
         avg_against = sum(pts_against) / len(pts_against) if pts_against else 110.0
 
-        return TeamStats(
+        stats = TeamStats(
             team_id=team_id,
             name=team.get("full_name", team_name),
             abbreviation=team.get("abbreviation", ""),
@@ -1044,6 +1069,8 @@ class NBAStatsClient:
             away_record=f"{away_w}-{away_l}",
             pace=round((avg_for + avg_against) / 2.0 * 100.0 / 110.0, 1),
         )
+        self._team_stats_cache[team_name] = stats
+        return stats
 
 
 # ---------------------------------------------------------------------------
