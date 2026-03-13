@@ -144,7 +144,7 @@ class SportsTradingBot:
 
         # Strategy (all limits are percentages — scales with capital)
         self.strategy = SportsStrategy({
-            "min_edge": 0.05,           # 5% minimum edge to enter
+            "min_edge": 0.10,           # 10% minimum edge to enter
             "kelly_fraction": 0.25,     # Quarter-Kelly sizing
             "max_position_pct": 0.05,   # 5% of capital per position
             "max_exposure_pct": 0.20,   # 20% max total open exposure
@@ -249,7 +249,7 @@ class SportsTradingBot:
                 base_results.append((contract, 0.5))
 
         # ── Screen: Find NBA candidates with base edge >= 3% ──
-        SCREEN_EDGE = 0.03  # Lower than trade threshold (5%) to catch near-misses
+        SCREEN_EDGE = 0.07  # Lower than trade threshold (10%) to catch near-misses
         nba_candidates = []
         final_results = []
 
