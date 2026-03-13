@@ -477,9 +477,10 @@ class SportsTradingBot:
                 if result:
                     log.info(f"    [LIVE] Order submitted: {result}")
                 else:
-                    log.warning(f"    [LIVE] Order submission failed")
+                    log.warning(f"    [LIVE] Order submission failed — skipping trade")
+                    continue  # Don't track or deduct capital for failed orders
 
-            # Track the trade
+            # Track the trade (paper mode always, live mode only if order succeeded)
             trade_record = {
                 "ticker": trade.ticker,
                 "title": trade.title,

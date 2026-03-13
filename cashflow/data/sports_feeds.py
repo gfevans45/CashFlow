@@ -730,7 +730,8 @@ class KalshiSportsClient(KalshiWeatherClient):
 
         Returns order response dict or None on failure.
         """
-        path = "/trade-api/v2/portfolio/orders"
+        import json as _json
+
         payload = {
             "ticker": ticker,
             "action": "buy",
@@ -747,8 +748,10 @@ class KalshiSportsClient(KalshiWeatherClient):
 
             url = f"{self.BASE_URL}/portfolio/orders"
             api_path = "/trade-api/v2/portfolio/orders"
+            body_str = _json.dumps(payload, separators=(",", ":"))
             timestamp_ms = str(int(datetime.utcnow().timestamp() * 1000))
-            message = timestamp_ms + "POST" + api_path
+            # Kalshi v2 POST signing: timestamp + method + path + body
+            message = timestamp_ms + "POST" + api_path + body_str
             signature = self._private_key.sign(
                 message.encode(), padding.PKCS1v15(), hashes.SHA256(),
             )
@@ -758,7 +761,8 @@ class KalshiSportsClient(KalshiWeatherClient):
                 "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
                 "Content-Type": "application/json",
             }
-            resp = self.session.post(url, json=payload, headers=headers,
+            # Send the exact same body string used in signing
+            resp = self.session.post(url, data=body_str, headers=headers,
                                      timeout=self.timeout)
             if resp.status_code in (200, 201):
                 log.info(f"Order placed: {side} {count}x {ticker} @ {price_cents}c")
