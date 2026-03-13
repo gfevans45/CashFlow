@@ -272,28 +272,58 @@ class KalshiSportsClient(KalshiWeatherClient):
     KalshiWeatherClient. Only adds sports-specific fetching and parsing.
     """
 
+    # Series prefixes we actually want to trade (game-day contracts)
+    _TARGET_SERIES_PREFIXES = [
+        # Men's college basketball
+        "KXNCAAMBGAME", "KXNCAAMBTOTAL", "KXNCAAMBSPREAD",
+        "KXNCAAMB",  # catch other NCAAMB series (conference tournaments, etc.)
+        "KXMARMAD",  # March Madness
+        # NBA
+        "KXNBAGAME", "KXNBA1HTOTAL", "KXNBA2HTOTAL", "KXNBA3QTOTAL",
+        "KXNBA3QSPREAD", "KXNBAPTS", "KXNBAREB", "KXNBAAST",
+        "KXNBABLK", "KXNBASTL", "KXNBA",
+        # PGA / Golf
+        "KXPGATOUR", "KXPGAMAKECUT", "KXPGA3BALL", "KXPGAR2LEAD",
+        "KXPGAWINMARGIN", "KXPGA",
+        "KXMASTERS", "KXLIVTOP",
+        # NFL
+        "KXNFLGAME", "KXNFL1HTOTAL", "KXNFL2HTOTAL", "KXNFL1HSPREAD",
+        "KXNFL2HSPREAD", "KXNFL4QWINNER", "KXNFLWINMARGIN",
+        "KXNFLOT", "KXNFLREC", "KXNFL2TD", "KXNFL4DCONV",
+        "KXNFLLEADCHANGE", "KXNFLPRIMETIME", "KXNFL",
+        # College football
+        "KXNCAAFGAME", "KXNCAAFTEAMTOTAL", "KXNCAAFSPREAD",
+        "KXNCAAF",
+    ]
+
     def get_sports_events(self) -> list:
         """Fetch sports-related events from Kalshi.
 
         Strategy:
-          1. Use /series?category=Sports to find sports series tickers
-          2. Fetch events for each sports series
-          3. Also paginate through all events to catch anything miscategorized
-          4. Deduplicate and filter
+          1. Use /series?category=Sports to find sports series
+          2. Filter to only game-day series we can trade (NBA, NCAAMB, PGA)
+          3. Fetch events with nested markets for matching series
         """
         seen = set()
         sports_events = []
 
-        # --- Method 1: Series-based discovery (most reliable) ---
+        # --- Fetch all sports series, filter to tradeable ones ---
         try:
             series_resp = self._get("/series", params={"category": "Sports"})
             if series_resp.status_code == 200:
-                series_list = series_resp.json().get("series", [])
-                log.info(f"Found {len(series_list)} sports series via /series?category=Sports")
-                for s in series_list:
+                all_series = series_resp.json().get("series", [])
+                # Filter to only series we care about
+                target_series = []
+                for s in all_series:
+                    ticker = s.get("ticker", "")
+                    if any(ticker.startswith(p) for p in self._TARGET_SERIES_PREFIXES):
+                        target_series.append(s)
+
+                log.info(f"Found {len(target_series)} tradeable series "
+                         f"(out of {len(all_series)} total sports series)")
+
+                for s in target_series:
                     series_ticker = s.get("ticker", "")
-                    if not series_ticker:
-                        continue
                     log.info(f"  Series: {series_ticker} — {s.get('title', '')[:60]}")
                     try:
                         params = {
@@ -310,44 +340,13 @@ class KalshiSportsClient(KalshiWeatherClient):
                                 if ticker and ticker not in seen:
                                     seen.add(ticker)
                                     sports_events.append(event)
-                        time.sleep(0.15)
+                        time.sleep(0.1)
                     except Exception as e:
-                        log.debug(f"  Failed to fetch events for series {series_ticker}: {e}")
+                        log.debug(f"  Failed to fetch events for {series_ticker}: {e}")
             else:
                 log.warning(f"Series endpoint returned {series_resp.status_code}")
         except Exception as e:
             log.warning(f"Series-based discovery failed: {e}")
-
-        # --- Method 2: Paginate all events, filter for sports ---
-        try:
-            cursor = ""
-            pages = 0
-            max_pages = 5  # Safety limit (5 * 200 = 1000 events max)
-            while pages < max_pages:
-                params = {"limit": 200, "status": "open",
-                          "with_nested_markets": "true"}
-                if cursor:
-                    params["cursor"] = cursor
-                resp = self._get("/events", params=params)
-                if resp.status_code != 200:
-                    break
-                data = resp.json()
-                events = data.get("events", [])
-                if not events:
-                    break
-                for event in events:
-                    ticker = event.get("event_ticker", "")
-                    if ticker and ticker not in seen and self._is_sports_event(event):
-                        seen.add(ticker)
-                        sports_events.append(event)
-                cursor = data.get("cursor", "")
-                if not cursor:
-                    break
-                pages += 1
-                time.sleep(0.15)
-            log.info(f"Paginated {pages + 1} pages of events")
-        except Exception as e:
-            log.warning(f"Paginated event scan failed: {e}")
 
         log.info(f"Total sports events found: {len(sports_events)}")
         for ev in sports_events:
