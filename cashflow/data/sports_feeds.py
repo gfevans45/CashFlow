@@ -394,6 +394,15 @@ class KalshiSportsClient(KalshiWeatherClient):
             # Filter out contracts with no price data
             if contract.yes_price <= 0:
                 skipped_no_price += 1
+                log.info(f"  SKIPPED (no price): {contract.title[:60]} | "
+                         f"raw keys: {list(m.keys())[:15]} | "
+                         f"yes_price={m.get('yes_price')} "
+                         f"last_price={m.get('last_price')} "
+                         f"yes_bid={m.get('yes_bid')} "
+                         f"yes_ask={m.get('yes_ask')} "
+                         f"previous_yes_price={m.get('previous_yes_price')} "
+                         f"floor_strike={m.get('floor_strike')} "
+                         f"cap_strike={m.get('cap_strike')}")
                 continue
             # Filter out multi-leg parlays (title contains "AND" or multiple bets)
             if self._is_parlay(contract):
