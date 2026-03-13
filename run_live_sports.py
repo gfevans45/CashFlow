@@ -708,6 +708,13 @@ class SportsTradingBot:
         kalshi_orders = self.kalshi.get_orders(status="resting")
         kalshi_order_map = {o["order_id"]: o for o in kalshi_orders}
 
+        # SAFETY: If API returned empty but we have resting orders,
+        # don't assume they're all gone — the API call may have failed
+        if not kalshi_orders and len(resting) > 0:
+            log.warning(f"  Kalshi returned 0 resting orders but we track {len(resting)} "
+                        f"— API may have failed, skipping reconciliation")
+            return
+
         min_edge = self.strategy.min_edge
         cancelled = 0
         updated = 0
@@ -720,16 +727,24 @@ class SportsTradingBot:
             # Check if order is still resting on Kalshi
             kalshi_order = kalshi_order_map.get(order_id)
             if not kalshi_order:
-                # Order no longer resting — it filled or was already cancelled
-                # Fetch all orders to find its final status
-                fill_count = trade_record.get("fill_count", 0)
-                trade_record["order_status"] = "executed" if fill_count > 0 else "canceled"
-                if trade_record["order_status"] == "executed" and fill_count > 0:
-                    # Deduct capital for fills we haven't accounted for
-                    filled_stake = trade_record["stake"] * (fill_count / trade_record["num_contracts"])
-                    self.capital -= filled_stake
-                    self.state["capital"] = round(self.capital, 2)
-                log.info(f"  Order {order_id[:12]}... no longer resting → {trade_record['order_status']}")
+                # Order genuinely no longer resting — check all orders for final status
+                all_orders = self.kalshi.get_orders(status="")
+                final_order = next((o for o in all_orders if o.get("order_id") == order_id), None)
+                if final_order:
+                    final_status = final_order.get("status", "unknown")
+                    fill_count = int(float(final_order.get("fill_count_fp", "0")))
+                    trade_record["order_status"] = final_status
+                    trade_record["fill_count"] = fill_count
+                    if fill_count > 0 and trade_record.get("fill_count", 0) == 0:
+                        # Newly filled — deduct capital
+                        filled_stake = trade_record["stake"] * (fill_count / trade_record["num_contracts"])
+                        self.capital -= filled_stake
+                        self.state["capital"] = round(self.capital, 2)
+                    log.info(f"  Order {order_id[:12]}... → {final_status} "
+                             f"(filled {fill_count}/{trade_record['num_contracts']})")
+                else:
+                    # Can't find order at all — keep tracking it, don't drop
+                    log.warning(f"  Order {order_id[:12]}... not found on Kalshi — keeping in state")
                 updated += 1
                 continue
 
@@ -737,7 +752,6 @@ class SportsTradingBot:
             new_fill_count = int(float(kalshi_order.get("fill_count_fp", "0")))
             old_fill_count = trade_record.get("fill_count", 0)
             if new_fill_count > old_fill_count:
-                # New fills since last check — deduct capital for new fills
                 new_fills = new_fill_count - old_fill_count
                 per_contract_cost = trade_record["stake"] / trade_record["num_contracts"]
                 self.capital -= new_fills * per_contract_cost
@@ -751,7 +765,6 @@ class SportsTradingBot:
             ticker = trade_record["ticker"]
             current_price = market_prices.get(ticker)
             if current_price is None:
-                # Can't find current price — leave order alone
                 continue
 
             model_prob = trade_record["model_prob"]
@@ -759,35 +772,39 @@ class SportsTradingBot:
 
             if position == "yes":
                 current_edge = model_prob - current_price
-            else:  # "no"
+            else:
                 current_edge = current_price - model_prob
 
             if current_edge < min_edge:
-                # Edge gone — cancel unfilled portion
                 unfilled = trade_record["num_contracts"] - new_fill_count
-                if unfilled > 0 and self.kalshi.cancel_order(order_id):
-                    trade_record["order_status"] = "canceled"
-                    log.info(f"  CANCELLED: {trade_record['title'][:40]} | "
-                             f"edge={current_edge:+.3f} < {min_edge:.3f} | "
-                             f"cancelled {unfilled} unfilled contracts")
-                    cancelled += 1
+                if unfilled > 0:
+                    if self.kalshi.cancel_order(order_id):
+                        trade_record["order_status"] = "canceled"
+                        log.info(f"  CANCELLED: {trade_record['title'][:40]} | "
+                                 f"edge={current_edge:+.3f} < {min_edge:.3f} | "
+                                 f"cancelled {unfilled} unfilled contracts")
+                        cancelled += 1
+                    else:
+                        # Cancel failed — keep tracking as resting, don't drop
+                        log.warning(f"  Cancel FAILED for {order_id[:12]}... — keeping as resting")
                 elif unfilled == 0:
-                    # Fully filled, just update status
                     trade_record["order_status"] = "executed"
                     updated += 1
 
         # Remove cancelled orders with 0 fills from open_trades
         still_open = []
         for t in open_trades:
-            if t.get("order_status") == "canceled" and t.get("fill_count", 0) == 0:
-                # Fully cancelled, no fills — drop from tracking
+            status = t.get("order_status")
+            fills = t.get("fill_count", 0)
+            if status == "canceled" and fills == 0:
                 self.state["total_trades"] = max(0, self.state.get("total_trades", 0) - 1)
                 continue
-            elif t.get("order_status") == "canceled" and t.get("fill_count", 0) > 0:
-                # Partially filled then cancelled — keep as executed with reduced size
+            elif status == "canceled" and fills > 0:
+                # Partially filled then cancelled — keep with reduced size
                 t["order_status"] = "executed"
-                t["num_contracts"] = t["fill_count"]
-                t["stake"] = t["stake"] * (t["fill_count"] / t.get("num_contracts", t["fill_count"]))
+                orig_contracts = t["num_contracts"]
+                t["num_contracts"] = fills
+                t["stake"] = round(t["stake"] * (fills / orig_contracts), 2)
                 still_open.append(t)
             else:
                 still_open.append(t)
@@ -1016,6 +1033,10 @@ Examples:
         "--config", type=str,
         help="Path to config YAML file",
     )
+    parser.add_argument(
+        "--cancel-all", action="store_true",
+        help="Cancel all resting orders on Kalshi and exit",
+    )
     args = parser.parse_args()
 
     mode = "LIVE" if args.live else "PAPER"
@@ -1054,6 +1075,22 @@ Examples:
     # Handle graceful shutdown
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
+
+    # Cancel all resting orders and exit
+    if args.cancel_all:
+        if bot._kalshi_available:
+            count = bot.kalshi.cancel_all_resting()
+            log.info(f"Cancelled {count} resting orders on Kalshi")
+            # Clear resting orders from state
+            open_trades = state.get("open_trades", [])
+            state["open_trades"] = [t for t in open_trades
+                                     if t.get("order_status") != "resting"
+                                     or t.get("fill_count", 0) > 0]
+            save_state(state)
+            log.info(f"State cleaned: {len(state['open_trades'])} trades remaining")
+        else:
+            log.error("Kalshi not available — cannot cancel orders")
+        return
 
     if args.once:
         bot.run_daily_cycle()

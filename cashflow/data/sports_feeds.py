@@ -840,6 +840,16 @@ class KalshiSportsClient(KalshiWeatherClient):
             log.error(f"Cancel order failed: {e}")
             return False
 
+    def cancel_all_resting(self) -> int:
+        """Cancel all resting orders. Returns count of cancelled orders."""
+        orders = self.get_orders(status="resting")
+        cancelled = 0
+        for order in orders:
+            order_id = order.get("order_id")
+            if order_id and self.cancel_order(order_id):
+                cancelled += 1
+        return cancelled
+
     def get_positions(self) -> list:
         """Fetch portfolio positions from Kalshi.
 
