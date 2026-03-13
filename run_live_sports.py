@@ -78,7 +78,7 @@ ACTIVE_START_HOUR = 10  # 10 AM ET
 ACTIVE_END_HOUR = 24    # Midnight ET (11:59 PM)
 
 # Supported sports
-SUPPORTED_SPORTS = ["nba", "ncaa", "mlb", "tennis", "soccer"]
+SUPPORTED_SPORTS = ["nba", "ncaa", "mlb", "pga", "tennis", "soccer"]
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +656,7 @@ Examples:
     )
     parser.add_argument(
         "--sport", type=str, default="",
-        choices=["", "nba", "ncaa", "nfl", "mlb", "tennis", "soccer"],
+        choices=["", "nba", "ncaa", "nfl", "mlb", "pga", "tennis", "soccer"],
         help="Filter to a specific sport (default: all)",
     )
     parser.add_argument(

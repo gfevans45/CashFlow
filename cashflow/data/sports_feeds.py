@@ -188,16 +188,57 @@ _OVER_UNDER_PATTERN = re.compile(
 
 # Sport detection keywords
 _SPORT_KEYWORDS = {
-    "nba": ["nba", "cavaliers", "celtics", "lakers", "warriors", "nuggets",
+    "nba": ["nba", "pro basketball",
+            # All 30 NBA teams (full names)
+            "cavaliers", "celtics", "lakers", "warriors", "nuggets",
             "bucks", "heat", "knicks", "nets", "bulls", "76ers", "suns",
             "mavericks", "thunder", "clippers", "rockets", "grizzlies",
             "pacers", "hawks", "pistons", "magic", "hornets", "wizards",
             "pelicans", "kings", "spurs", "blazers", "raptors", "jazz",
-            "timberwolves", "cleveland", "detroit", "boston", "golden state"],
-    "ncaa": ["ncaa", "college", "michigan", "duke", "kentucky", "gonzaga",
-             "kansas", "unc", "north carolina", "villanova", "purdue",
-             "uconn", "alabama", "houston", "tennessee", "iowa",
-             "march madness", "tournament"],
+            "timberwolves",
+            # City / market names
+            "cleveland", "detroit", "boston", "golden state", "milwaukee",
+            "miami heat", "new york knicks", "brooklyn", "chicago bulls",
+            "phoenix suns", "dallas mavericks", "oklahoma city thunder",
+            "la clippers", "los angeles lakers", "houston rockets",
+            "memphis grizzlies", "indiana pacers", "atlanta hawks",
+            "orlando magic", "charlotte hornets", "washington wizards",
+            "new orleans pelicans", "sacramento kings", "san antonio spurs",
+            "portland trail blazers", "toronto raptors", "utah jazz",
+            "minnesota timberwolves", "denver nuggets",
+            # Star players for contract matching
+            "lebron james", "stephen curry", "luka doncic", "giannis",
+            "nikola jokic", "joel embiid", "jayson tatum",
+            "shai gilgeous-alexander", "anthony edwards", "donovan mitchell",
+            "kevin durant", "jimmy butler", "damian lillard",
+            "devin booker", "james harden", "anthony davis"],
+    "ncaa": ["ncaa", "college basketball", "march madness", "tournament",
+             "sweet 16", "elite 8", "final four", "first four",
+             "college", "acc", "big ten", "big 12", "big east", "sec",
+             # SEC teams
+             "alabama", "auburn", "arkansas", "florida", "georgia",
+             "kentucky", "lsu", "mississippi state", "ole miss",
+             "missouri", "oklahoma", "south carolina", "tennessee",
+             "texas", "texas a&m", "vanderbilt",
+             # Big Ten / Big 12 / ACC / Big East
+             "michigan", "michigan state", "ohio state", "purdue",
+             "indiana", "illinois", "iowa", "wisconsin", "minnesota",
+             "kansas", "baylor", "texas tech", "houston", "cincinnati",
+             "duke", "unc", "north carolina", "virginia", "clemson",
+             "louisville", "syracuse", "villanova", "creighton",
+             "marquette", "st. john's", "uconn", "xavier",
+             # Other top programs
+             "gonzaga", "arizona", "ucla", "usc", "oregon",
+             "memphis", "dayton", "san diego state"],
+    "pga": ["pga", "golf", "golfer", "players championship", "masters",
+            "us open golf", "open championship", "pga championship",
+            "ryder cup", "tour championship", "fedex cup",
+            "scottie scheffler", "rory mcilroy", "jon rahm",
+            "xander schauffele", "collin morikawa", "bryson dechambeau",
+            "wyndham clark", "viktor hovland", "patrick cantlay",
+            "ludvig aberg", "sahith theegala", "max homa",
+            "jordan spieth", "justin thomas", "brooks koepka",
+            "tpc sawgrass", "augusta national"],
     "nfl": ["nfl", "football", "quarterback", "touchdown", "passing yards"],
     "tennis": ["tennis", "atp", "wta", "grand slam", "sinner", "alcaraz",
                "djokovic", "medvedev", "swiatek", "sabalenka", "wimbledon",
@@ -219,7 +260,8 @@ _SPORT_KEYWORDS = {
 # Ticker prefix patterns for sports
 _SPORTS_TICKER_PREFIXES = [
     "KXMVESPORTS", "KXMVECROSS", "KXNBA", "KXNCAA", "KXNFL", "KXMLB",
-    "NBA", "NCAA", "NFL", "SPORTS",
+    "KXPGA", "KXGOLF",
+    "NBA", "NCAA", "NFL", "SPORTS", "PGA", "GOLF",
 ]
 
 
@@ -291,7 +333,7 @@ class KalshiSportsClient(KalshiWeatherClient):
         # Category check (Kalshi uses these category strings)
         sports_categories = {
             "sports", "nba", "ncaa", "nfl", "mlb", "tennis", "soccer",
-            "sports & gaming",
+            "pga", "golf", "sports & gaming",
         }
         if category in sports_categories:
             return True
@@ -307,9 +349,10 @@ class KalshiSportsClient(KalshiWeatherClient):
             if hits >= 2:
                 return True
             # Single hit OK for very specific keywords (league names)
-            specific = {"nba", "ncaa", "nfl", "mlb", "atp", "wta",
-                        "premier league", "la liga", "champions league",
-                        "march madness", "mls"}
+            specific = {"nba", "ncaa", "nfl", "mlb", "pga", "golf",
+                        "atp", "wta", "premier league", "la liga",
+                        "champions league", "march madness", "mls",
+                        "players championship", "masters", "pga championship"}
             if hits == 1 and any(kw in text for kw in specific):
                 return True
 
@@ -469,8 +512,8 @@ class KalshiSportsClient(KalshiWeatherClient):
         combined = f"{text} {ticker}".lower()
         category = data.get("category", "").lower()
 
-        if category in ("nba", "ncaa", "nfl", "mlb"):
-            return category
+        if category in ("nba", "ncaa", "nfl", "mlb", "pga", "golf"):
+            return "pga" if category == "golf" else category
 
         for sport, keywords in _SPORT_KEYWORDS.items():
             if any(kw in combined for kw in keywords):
@@ -1486,6 +1529,34 @@ def generate_simulated_sports_contracts(num_contracts: int = 15) -> list[SportsC
             threshold=0.0, spread=0.0, total=total,
             home_team="", away_team="",
             event_ticker=f"SIM-MLB-TOTAL-{i}",
+        ))
+
+    # Simulated PGA tournament winners
+    pga_golfers = [
+        ("Scottie Scheffler", "Xander Schauffele", 0.58),
+        ("Rory McIlroy", "Collin Morikawa", 0.52),
+        ("Jon Rahm", "Bryson DeChambeau", 0.50),
+    ]
+
+    for i, (p1, p2, true_prob) in enumerate(pga_golfers):
+        noise = random.gauss(0, 0.05)
+        market_price = max(0.05, min(0.95, true_prob + noise))
+
+        contracts.append(SportsContract(
+            ticker=f"SIM-PGA-WIN-{i}",
+            title=f"yes {p1} beats {p2}",
+            contract_type="game_winner",
+            sport="pga",
+            yes_price=round(market_price, 3),
+            no_price=round(1.0 - market_price, 3),
+            volume=random.randint(50, 300),
+            status="open",
+            expiration=f"{today} 23:59",
+            team_a=p1, team_b=p2,
+            player_name="", stat_type="",
+            threshold=0.0, spread=0.0, total=0.0,
+            home_team="", away_team="",
+            event_ticker=f"SIM-PGA-{i}",
         ))
 
     # Simulated Tennis match winners

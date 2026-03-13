@@ -569,8 +569,8 @@ class SportsStrategy:
                     contract, mlb_team_a_stats, mlb_team_b_stats,
                 )
 
-        # Tennis/Soccer — use game_winner model with simple win% fallback
-        if sport in ("tennis", "soccer"):
+        # Tennis/Soccer/PGA — use game_winner model with simple win% fallback
+        if sport in ("tennis", "soccer", "pga"):
             if ctype == "game_winner":
                 # No deep stats for these yet — use market price as fair,
                 # only trade if we detect obvious mispricing
