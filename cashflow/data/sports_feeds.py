@@ -800,7 +800,7 @@ class NBAStatsClient:
         self._team_stats_cache: dict = {}  # team_name -> TeamStats
         self._teams_list: Optional[list] = None  # cached teams list
         self._last_request_time: float = 0.0
-        self._min_request_interval: float = 1.1  # seconds between requests (< 60/min)
+        self._min_request_interval: float = 1.5  # seconds between requests (~40/min, safe margin)
 
     @property
     def available(self) -> bool:
@@ -814,26 +814,32 @@ class NBAStatsClient:
         self._last_request_time = time.time()
 
     def _get(self, path: str, params: dict = None) -> Optional[dict]:
-        """Make a GET request to balldontlie API."""
-        self._throttle()
-        try:
-            resp = self.session.get(
-                f"{self.BASE_URL}{path}",
-                params=params,
-                timeout=self.timeout,
-            )
-            if resp.status_code == 200:
-                return resp.json()
-            elif resp.status_code == 429:
-                log.warning("balldontlie rate limited, backing off")
-                time.sleep(5)
+        """Make a GET request to balldontlie API with retry on rate limit."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            self._throttle()
+            try:
+                resp = self.session.get(
+                    f"{self.BASE_URL}{path}",
+                    params=params,
+                    timeout=self.timeout,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+                elif resp.status_code == 429:
+                    backoff = 15 * (attempt + 1)  # 15s, 30s, 45s
+                    log.warning(f"balldontlie rate limited, retrying in {backoff}s "
+                                f"(attempt {attempt + 1}/{max_retries})")
+                    time.sleep(backoff)
+                    continue
+                else:
+                    log.debug(f"balldontlie {path} failed ({resp.status_code})")
+                    return None
+            except requests.RequestException as e:
+                log.error(f"balldontlie request failed: {e}")
                 return None
-            else:
-                log.debug(f"balldontlie {path} failed ({resp.status_code})")
-                return None
-        except requests.RequestException as e:
-            log.error(f"balldontlie request failed: {e}")
-            return None
+        log.warning(f"balldontlie {path} failed after {max_retries} retries")
+        return None
 
     def search_player(self, name: str) -> Optional[dict]:
         """Search for a player by name."""
