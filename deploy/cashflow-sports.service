@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=cashflow
-Group=cashflow
+User=root
+Group=root
 WorkingDirectory=/opt/cashflow
-ExecStart=/opt/cashflow/.venv/bin/python run_live_sports.py
+ExecStart=/opt/cashflow/venv/bin/python run_live_sports.py
 Restart=on-failure
 RestartSec=60
 StartLimitIntervalSec=300
