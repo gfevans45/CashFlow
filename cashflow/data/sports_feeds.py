@@ -778,6 +778,85 @@ class KalshiSportsClient(KalshiWeatherClient):
             log.error(f"Order placement failed: {e}")
             return None
 
+    def get_orders(self, status: str = "resting") -> list:
+        """Fetch orders from Kalshi, optionally filtered by status.
+
+        Args:
+            status: Filter by order status (resting, executed, canceled, etc.)
+
+        Returns list of order dicts or empty list on failure.
+        """
+        try:
+            params = {"status": status} if status else None
+            resp = self._get("/portfolio/orders", params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("orders", [])
+            else:
+                log.error(f"get_orders failed ({resp.status_code}): {resp.text[:200]}")
+                return []
+        except Exception as e:
+            log.error(f"get_orders failed: {e}")
+            return []
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel a resting order on Kalshi.
+
+        Args:
+            order_id: The order ID to cancel.
+
+        Returns True if cancelled successfully, False otherwise.
+        """
+        import base64
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding as _padding
+
+        try:
+            url = f"{self.BASE_URL}/portfolio/orders/{order_id}"
+            api_path = f"/trade-api/v2/portfolio/orders/{order_id}"
+            timestamp_ms = str(int(datetime.utcnow().timestamp() * 1000))
+            message = timestamp_ms + "DELETE" + api_path
+            signature = self._private_key.sign(
+                message.encode(),
+                _padding.PSS(
+                    mgf=_padding.MGF1(hashes.SHA256()),
+                    salt_length=_padding.PSS.DIGEST_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
+            headers = {
+                "KALSHI-ACCESS-KEY": self._api_key,
+                "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
+                "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+            }
+            resp = self.session.delete(url, headers=headers, timeout=self.timeout)
+            if resp.status_code in (200, 204):
+                log.info(f"Order cancelled: {order_id}")
+                return True
+            else:
+                log.error(f"Cancel failed ({resp.status_code}): {resp.text[:200]}")
+                return False
+        except Exception as e:
+            log.error(f"Cancel order failed: {e}")
+            return False
+
+    def get_positions(self) -> list:
+        """Fetch portfolio positions from Kalshi.
+
+        Returns list of position dicts with settlement info, or empty list.
+        """
+        try:
+            resp = self._get("/portfolio/positions")
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("market_positions", data.get("positions", []))
+            else:
+                log.error(f"get_positions failed ({resp.status_code}): {resp.text[:200]}")
+                return []
+        except Exception as e:
+            log.error(f"get_positions failed: {e}")
+            return []
+
 
 # ---------------------------------------------------------------------------
 # NBA Stats Client (balldontlie.io)

@@ -468,6 +468,10 @@ class SportsTradingBot:
                 f"| Qty: {trade.num_contracts}"
             )
 
+            order_id = None
+            order_status = "paper"
+            fill_count = trade.num_contracts  # paper assumes full fill
+
             if not self.paper_mode and self._kalshi_available:
                 price_cents = int(trade.entry_price * 100)
                 result = self.kalshi.place_order(
@@ -475,12 +479,17 @@ class SportsTradingBot:
                     trade.num_contracts, price_cents,
                 )
                 if result:
-                    log.info(f"    [LIVE] Order submitted: {result}")
+                    order = result.get("order", {})
+                    order_id = order.get("order_id")
+                    order_status = order.get("status", "unknown")
+                    fill_count = int(float(order.get("fill_count_fp", "0")))
+                    log.info(f"    [LIVE] Order {order_id}: status={order_status}, "
+                             f"filled={fill_count}/{trade.num_contracts}")
                 else:
                     log.warning(f"    [LIVE] Order submission failed — skipping trade")
                     continue  # Don't track or deduct capital for failed orders
 
-            # Track the trade (paper mode always, live mode only if order succeeded)
+            # Track the trade
             trade_record = {
                 "ticker": trade.ticker,
                 "title": trade.title,
@@ -496,10 +505,26 @@ class SportsTradingBot:
                 "placed_at": datetime.now(ET).isoformat(),
                 "settled": False,
                 "pnl": 0.0,
+                "order_id": order_id,
+                "order_status": order_status,
+                "fill_count": fill_count,
             }
 
             self.state.setdefault("open_trades", []).append(trade_record)
-            self.capital -= trade.stake
+
+            # Only deduct capital for filled contracts, not resting ones
+            if order_status == "executed":
+                # Fully filled — deduct full stake
+                self.capital -= trade.stake
+            elif order_status == "resting" and fill_count > 0:
+                # Partially filled — deduct proportional stake
+                filled_stake = trade.stake * (fill_count / trade.num_contracts)
+                self.capital -= filled_stake
+            elif order_status == "paper":
+                # Paper mode — deduct full stake
+                self.capital -= trade.stake
+            # else: resting with 0 fills — no capital deducted yet
+
             self.state["capital"] = round(self.capital, 2)
             self.state["total_trades"] = self.state.get("total_trades", 0) + 1
             placed.append(trade)
@@ -511,11 +536,10 @@ class SportsTradingBot:
     # --- Settlement ---
 
     def check_settlements(self) -> float:
-        """Check and settle trades from previous days.
+        """Check and settle trades.
 
-        In paper mode, we simulate outcomes using the model probability
-        (a coin flip weighted by model_prob). This approximates real
-        settlement behavior over many trades.
+        Live mode: Query Kalshi positions for actual settlement results.
+        Paper mode: Simulate outcomes using model probability (coin flip).
 
         Returns total settlement P&L.
         """
@@ -528,45 +552,82 @@ class SportsTradingBot:
         still_open = []
         newly_settled = []
 
+        # In live mode, fetch positions from Kalshi to check settlements
+        kalshi_positions = {}
+        if not self.paper_mode and self._kalshi_available:
+            positions = self.kalshi.get_positions()
+            for pos in positions:
+                ticker = pos.get("ticker", pos.get("market_ticker", ""))
+                if ticker:
+                    kalshi_positions[ticker] = pos
+
         for trade_record in open_trades:
             placed_at = trade_record.get("placed_at", "")
-
-            # Only settle trades placed before today
             trade_date = placed_at[:10] if placed_at else ""
+            fill_count = trade_record.get("fill_count", trade_record.get("num_contracts", 0))
+
+            # Skip unfilled orders (resting with 0 fills)
+            if trade_record.get("order_status") == "resting" and fill_count == 0:
+                still_open.append(trade_record)
+                continue
+
+            # Live mode: check Kalshi for settlement
+            if not self.paper_mode and self._kalshi_available:
+                ticker = trade_record["ticker"]
+                position_data = kalshi_positions.get(ticker)
+
+                if position_data:
+                    # Check if market has settled
+                    market_result = position_data.get("market_result", "")
+                    if market_result in ("yes", "no", "all_no", "all_yes"):
+                        outcome = market_result in ("yes", "all_yes")
+                        trade = self._make_trade(trade_record, fill_count)
+                        pnl = self.strategy.settle_trade(trade, outcome)
+                        settlement_pnl += pnl
+                        self.capital += pnl + trade.stake
+                        self.state["capital"] = round(self.capital, 2)
+
+                        outcome_str = "WIN" if pnl > 0 else "LOSS"
+                        log.info(
+                            f"  SETTLED [{outcome_str}]: {trade_record['title'][:40]} "
+                            f"| {trade_record['position'].upper()} "
+                            f"| P&L: ${pnl:+.2f} (Kalshi: {market_result})"
+                        )
+
+                        trade_record["settled"] = True
+                        trade_record["pnl"] = pnl
+                        trade_record["outcome"] = outcome
+                        trade_record["settled_at"] = datetime.now(ET).isoformat()
+                        newly_settled.append(trade_record)
+
+                        if pnl > 0:
+                            self.state["total_wins"] = self.state.get("total_wins", 0) + 1
+                        else:
+                            self.state["total_losses"] = self.state.get("total_losses", 0) + 1
+                        continue
+
+                # Not settled yet — keep open
+                still_open.append(trade_record)
+                continue
+
+            # Paper mode: only settle trades from previous days
             if trade_date >= today:
                 still_open.append(trade_record)
                 continue
 
-            # In paper mode, simulate outcome using model probability
-            # (weighted coin flip — over many trades this converges)
             model_prob = trade_record.get("model_prob", 0.5)
-            outcome = random.random() < model_prob  # True = YES won
-
-            # Reconstruct trade for settlement
-            trade = SportsTrade(
-                ticker=trade_record["ticker"],
-                title=trade_record["title"],
-                contract_type=trade_record["contract_type"],
-                sport=trade_record["sport"],
-                position=trade_record["position"],
-                entry_price=trade_record["entry_price"],
-                model_prob=model_prob,
-                market_price=trade_record["market_price"],
-                edge=trade_record["edge"],
-                stake=trade_record["stake"],
-                num_contracts=trade_record["num_contracts"],
-            )
-
+            outcome = random.random() < model_prob
+            trade = self._make_trade(trade_record, fill_count)
             pnl = self.strategy.settle_trade(trade, outcome)
             settlement_pnl += pnl
-            self.capital += pnl + trade.stake  # Return stake + P&L
+            self.capital += pnl + trade.stake
             self.state["capital"] = round(self.capital, 2)
 
             outcome_str = "WIN" if pnl > 0 else "LOSS"
             log.info(
                 f"  SETTLED [{outcome_str}]: {trade_record['title'][:40]} "
                 f"| {trade_record['position'].upper()} "
-                f"| P&L: ${pnl:+.2f}"
+                f"| P&L: ${pnl:+.2f} (simulated)"
             )
 
             trade_record["settled"] = True
@@ -593,12 +654,155 @@ class SportsTradingBot:
 
         return settlement_pnl
 
+    def _make_trade(self, trade_record: dict, fill_count: int = None) -> SportsTrade:
+        """Reconstruct a SportsTrade from a trade record."""
+        num = fill_count if fill_count else trade_record["num_contracts"]
+        entry = trade_record["entry_price"]
+        stake = num * entry  # Recalculate based on actual fills
+        return SportsTrade(
+            ticker=trade_record["ticker"],
+            title=trade_record["title"],
+            contract_type=trade_record["contract_type"],
+            sport=trade_record["sport"],
+            position=trade_record["position"],
+            entry_price=entry,
+            model_prob=trade_record.get("model_prob", 0.5),
+            market_price=trade_record["market_price"],
+            edge=trade_record["edge"],
+            stake=stake,
+            num_contracts=num,
+        )
+
+    # --- Order management ---
+
+    def manage_orders(self, contracts: list = None):
+        """Check resting orders and cancel if edge has deteriorated.
+
+        For each resting order:
+        - Fetch current market price from scanned contracts
+        - Recompute edge: model_prob vs current market
+        - Cancel if edge < min_edge threshold (5%)
+        - Reclaim capital for cancelled/unfilled orders
+        - Update fill status for partially/fully filled orders
+        """
+        if self.paper_mode or not self._kalshi_available:
+            return
+
+        open_trades = self.state.get("open_trades", [])
+        resting = [t for t in open_trades if t.get("order_status") == "resting"]
+        if not resting:
+            return
+
+        log.info(f"Checking {len(resting)} resting orders...")
+
+        # Build ticker -> current market price lookup from scanned contracts
+        market_prices = {}
+        if contracts:
+            for c in contracts:
+                market_prices[c.ticker] = c.yes_price
+
+        # Fetch current order status from Kalshi
+        kalshi_orders = self.kalshi.get_orders(status="resting")
+        kalshi_order_map = {o["order_id"]: o for o in kalshi_orders}
+
+        min_edge = self.strategy.min_edge
+        cancelled = 0
+        updated = 0
+
+        for trade_record in open_trades:
+            order_id = trade_record.get("order_id")
+            if not order_id or trade_record.get("order_status") != "resting":
+                continue
+
+            # Check if order is still resting on Kalshi
+            kalshi_order = kalshi_order_map.get(order_id)
+            if not kalshi_order:
+                # Order no longer resting — it filled or was already cancelled
+                # Fetch all orders to find its final status
+                fill_count = trade_record.get("fill_count", 0)
+                trade_record["order_status"] = "executed" if fill_count > 0 else "canceled"
+                if trade_record["order_status"] == "executed" and fill_count > 0:
+                    # Deduct capital for fills we haven't accounted for
+                    filled_stake = trade_record["stake"] * (fill_count / trade_record["num_contracts"])
+                    self.capital -= filled_stake
+                    self.state["capital"] = round(self.capital, 2)
+                log.info(f"  Order {order_id[:12]}... no longer resting → {trade_record['order_status']}")
+                updated += 1
+                continue
+
+            # Update fill count from Kalshi
+            new_fill_count = int(float(kalshi_order.get("fill_count_fp", "0")))
+            old_fill_count = trade_record.get("fill_count", 0)
+            if new_fill_count > old_fill_count:
+                # New fills since last check — deduct capital for new fills
+                new_fills = new_fill_count - old_fill_count
+                per_contract_cost = trade_record["stake"] / trade_record["num_contracts"]
+                self.capital -= new_fills * per_contract_cost
+                self.state["capital"] = round(self.capital, 2)
+                trade_record["fill_count"] = new_fill_count
+                log.info(f"  Order {order_id[:12]}... filled {new_fills} more "
+                         f"({new_fill_count}/{trade_record['num_contracts']} total)")
+                updated += 1
+
+            # Re-evaluate edge using current market price
+            ticker = trade_record["ticker"]
+            current_price = market_prices.get(ticker)
+            if current_price is None:
+                # Can't find current price — leave order alone
+                continue
+
+            model_prob = trade_record["model_prob"]
+            position = trade_record["position"]
+
+            if position == "yes":
+                current_edge = model_prob - current_price
+            else:  # "no"
+                current_edge = current_price - model_prob
+
+            if current_edge < min_edge:
+                # Edge gone — cancel unfilled portion
+                unfilled = trade_record["num_contracts"] - new_fill_count
+                if unfilled > 0 and self.kalshi.cancel_order(order_id):
+                    trade_record["order_status"] = "canceled"
+                    log.info(f"  CANCELLED: {trade_record['title'][:40]} | "
+                             f"edge={current_edge:+.3f} < {min_edge:.3f} | "
+                             f"cancelled {unfilled} unfilled contracts")
+                    cancelled += 1
+                elif unfilled == 0:
+                    # Fully filled, just update status
+                    trade_record["order_status"] = "executed"
+                    updated += 1
+
+        # Remove cancelled orders with 0 fills from open_trades
+        still_open = []
+        for t in open_trades:
+            if t.get("order_status") == "canceled" and t.get("fill_count", 0) == 0:
+                # Fully cancelled, no fills — drop from tracking
+                self.state["total_trades"] = max(0, self.state.get("total_trades", 0) - 1)
+                continue
+            elif t.get("order_status") == "canceled" and t.get("fill_count", 0) > 0:
+                # Partially filled then cancelled — keep as executed with reduced size
+                t["order_status"] = "executed"
+                t["num_contracts"] = t["fill_count"]
+                t["stake"] = t["stake"] * (t["fill_count"] / t.get("num_contracts", t["fill_count"]))
+                still_open.append(t)
+            else:
+                still_open.append(t)
+
+        self.state["open_trades"] = still_open
+        save_state(self.state)
+
+        if cancelled or updated:
+            log.info(f"Order management: {cancelled} cancelled, {updated} updated | "
+                     f"Capital: ${self.capital:.2f}")
+
     # --- Daily run ---
 
     def run_daily_cycle(self):
         """Execute one full daily trading cycle.
 
         1. Check settlements from previous trades
+        1.5. Manage resting orders (cancel if edge gone)
         2. Scan Kalshi sports markets (or simulated)
         3. Fetch player/team stats and compute model probabilities
         4. Evaluate and place trades
@@ -629,6 +833,9 @@ class SportsTradingBot:
             log.warning("No sports contracts found — skipping trading")
             save_state(self.state)
             return
+
+        # Step 2.5: Manage resting orders (cancel if edge gone)
+        self.manage_orders(contracts)
 
         # Step 3: Compute probabilities
         log.info(f"Computing model probabilities for {len(contracts)} contracts...")
