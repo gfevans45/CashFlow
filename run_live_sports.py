@@ -142,15 +142,15 @@ class SportsTradingBot:
         self.capital = state["capital"]
         self.sport_filter = state.get("sport_filter", "")
 
-        # Strategy (sized for $100 capital)
+        # Strategy (all limits are percentages — scales with capital)
         self.strategy = SportsStrategy({
-            "min_edge": 0.05,
-            "kelly_fraction": 0.25,
-            "max_position_pct": 0.10,
-            "max_positions": 5,
-            "min_stake": 1.0,
-            "max_stake": 10.0,
-            "daily_loss_limit_pct": 0.05,
+            "min_edge": 0.05,           # 5% minimum edge to enter
+            "kelly_fraction": 0.25,     # Quarter-Kelly sizing
+            "max_position_pct": 0.05,   # 5% of capital per position
+            "max_exposure_pct": 0.20,   # 20% max total open exposure
+            "max_positions": 5,         # Max 5 concurrent positions
+            "min_stake": 1.0,           # $1 minimum trade
+            "daily_loss_limit_pct": 0.05,  # Stop after 5% daily loss
         })
 
         # Data clients
@@ -443,11 +443,14 @@ class SportsTradingBot:
 
         Returns list of SportsTrade objects for trades placed.
         """
-        open_count = len(self.state.get("open_trades", []))
+        open_trades = self.state.get("open_trades", [])
+        open_count = len(open_trades)
+        open_exposure = sum(t.get("stake", 0) for t in open_trades)
         daily_pnl = self.state.get("daily_pnl", 0.0)
 
         trades = self.strategy.evaluate_contracts(
             contracts_with_probs, self.capital, daily_pnl, open_count,
+            open_exposure,
         )
 
         if not trades:
@@ -792,6 +795,9 @@ class SportsTradingBot:
         self.state["open_trades"] = still_open
         save_state(self.state)
 
+        if cancelled:
+            self.state["total_cancelled"] = self.state.get("total_cancelled", 0) + cancelled
+
         if cancelled or updated:
             log.info(f"Order management: {cancelled} cancelled, {updated} updated | "
                      f"Capital: ${self.capital:.2f}")
@@ -879,13 +885,34 @@ class SportsTradingBot:
 
     def _print_daily_summary(self, trades: list, settlement_pnl: float,
                               contracts: list):
-        """Print end-of-cycle summary."""
+        """Print end-of-cycle summary with performance metrics."""
         total_pnl = self.state.get("total_pnl", 0.0)
         total_trades = self.state.get("total_trades", 0)
         total_wins = self.state.get("total_wins", 0)
         total_losses = self.state.get("total_losses", 0)
+        total_cancelled = self.state.get("total_cancelled", 0)
         win_rate = (total_wins / (total_wins + total_losses) * 100
                     if (total_wins + total_losses) > 0 else 0)
+
+        # Exposure tracking
+        open_trades = self.state.get("open_trades", [])
+        open_exposure = sum(t.get("stake", 0) for t in open_trades)
+        max_exposure = self.capital * self.strategy.max_exposure_pct
+
+        # Performance metrics
+        initial_capital = self.state.get("initial_capital", 100.0)
+        roi_pct = ((self.capital - initial_capital) / initial_capital) * 100
+        max_drawdown = self.state.get("max_drawdown", 0.0)
+        peak_capital = self.state.get("peak_capital", initial_capital)
+
+        # Update peak/drawdown tracking
+        if self.capital > peak_capital:
+            peak_capital = self.capital
+            self.state["peak_capital"] = peak_capital
+        drawdown = (peak_capital - self.capital) / peak_capital if peak_capital > 0 else 0
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+            self.state["max_drawdown"] = max_drawdown
 
         log.info("-" * 60)
         log.info("  DAILY SUMMARY")
@@ -893,11 +920,15 @@ class SportsTradingBot:
         log.info(f"  Contracts scanned: {len(contracts)}")
         log.info(f"  Trades placed: {len(trades)}")
         log.info(f"  Settlement P&L: ${settlement_pnl:+.2f}")
-        log.info(f"  Open trades: {len(self.state.get('open_trades', []))}")
+        log.info(f"  Open trades: {len(open_trades)} "
+                 f"(exposure: ${open_exposure:.2f} / ${max_exposure:.2f})")
         log.info(f"  Capital: ${self.capital:.2f}")
         log.info(f"  Total P&L: ${total_pnl:+.2f}")
-        log.info(f"  Total trades: {total_trades} "
-                 f"({total_wins}W/{total_losses}L, {win_rate:.0f}%)")
+        log.info(f"  ROI: {roi_pct:+.1f}%")
+        log.info(f"  Max drawdown: {max_drawdown:.1%}")
+        log.info(f"  Trades: {total_trades} "
+                 f"({total_wins}W/{total_losses}L/{total_cancelled}C, "
+                 f"{win_rate:.0f}% win rate)")
         log.info(f"  State: {STATE_FILE}")
         log.info("-" * 60)
 

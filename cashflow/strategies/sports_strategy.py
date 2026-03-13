@@ -500,12 +500,13 @@ class SportsStrategy:
     Evaluates sports contracts using the three sub-models and generates
     trades where our estimated probability diverges from the market price.
 
-    Configuration mirrors WeatherStrategy for consistency:
+    Configuration:
       - min_edge: Minimum edge (model_prob - market_price) to trade (default 5%)
       - kelly_fraction: Quarter-Kelly (0.25)
-      - max_position_pct: Max position as fraction of capital (10%)
+      - max_position_pct: Max single position as fraction of capital (5%)
+      - max_exposure_pct: Max total open exposure as fraction of capital (20%)
       - max_positions: Max concurrent positions (5)
-      - min_stake / max_stake: Trade size bounds ($1 - $5)
+      - min_stake: Minimum trade size ($1)
       - daily_loss_limit_pct: Stop trading after losing this much (5%)
     """
 
@@ -513,10 +514,10 @@ class SportsStrategy:
         config = config or {}
         self.min_edge = config.get("min_edge", 0.05)
         self.kelly_fraction = config.get("kelly_fraction", 0.25)
-        self.max_position_pct = config.get("max_position_pct", 0.10)
+        self.max_position_pct = config.get("max_position_pct", 0.05)
+        self.max_exposure_pct = config.get("max_exposure_pct", 0.20)
         self.max_positions = config.get("max_positions", 5)
         self.min_stake = config.get("min_stake", 1.0)
-        self.max_stake = config.get("max_stake", 10.0)
         self.daily_loss_limit_pct = config.get("daily_loss_limit_pct", 0.05)
         self.preferred_price_low = 0.40
         self.preferred_price_high = 0.60
@@ -699,7 +700,8 @@ class SportsStrategy:
 
     def evaluate_contracts(self, contracts_with_probs: list[tuple],
                             capital: float, daily_pnl: float,
-                            open_count: int) -> list[SportsTrade]:
+                            open_count: int,
+                            open_exposure: float = 0.0) -> list[SportsTrade]:
         """Evaluate contracts and return trades to take.
 
         Args:
@@ -707,6 +709,7 @@ class SportsStrategy:
             capital: Current capital.
             daily_pnl: P&L for the day so far.
             open_count: Number of currently open positions.
+            open_exposure: Total stake in currently open positions.
 
         Returns list of SportsTrade objects for trades to place.
         """
@@ -718,6 +721,13 @@ class SportsStrategy:
         available_slots = self.max_positions - open_count
         if available_slots <= 0:
             log.info("Max positions reached, no new trades")
+            return []
+
+        # Check total exposure limit
+        max_exposure = capital * self.max_exposure_pct
+        remaining_exposure = max_exposure - open_exposure
+        if remaining_exposure <= 0:
+            log.info(f"Max exposure reached (${open_exposure:.2f}/{max_exposure:.2f}), no new trades")
             return []
 
         scored = []
@@ -756,6 +766,7 @@ class SportsStrategy:
         scored.sort(key=lambda x: -x[0])
 
         trades = []
+        total_new_exposure = 0.0
         for edge, contract, model_prob, position, eff_price in scored:
             if len(trades) >= available_slots:
                 break
@@ -767,7 +778,12 @@ class SportsStrategy:
             num_contracts = max(1, int(stake / eff_price))
             actual_stake = round(num_contracts * eff_price, 2)
 
+            # Check daily loss limit
             if daily_pnl - actual_stake <= -daily_loss_limit:
+                continue
+
+            # Check exposure limit
+            if total_new_exposure + actual_stake > remaining_exposure:
                 continue
 
             trade = SportsTrade(
@@ -785,17 +801,18 @@ class SportsStrategy:
                 raw_contract=contract.raw,
             )
             trades.append(trade)
+            total_new_exposure += actual_stake
 
         return trades
 
     def _kelly_size(self, edge: float, price: float, capital: float) -> float:
-        """Quarter-Kelly position sizing."""
+        """Quarter-Kelly position sizing, capped at max_position_pct of capital."""
         if price <= 0 or price >= 1:
             return 0.0
 
         kelly = edge / (1 - price)
         stake = capital * kelly * self.kelly_fraction
-        max_allowed = min(capital * self.max_position_pct, self.max_stake)
+        max_allowed = capital * self.max_position_pct
         return round(min(stake, max_allowed), 2)
 
     def settle_trade(self, trade: SportsTrade, outcome: bool) -> float:
