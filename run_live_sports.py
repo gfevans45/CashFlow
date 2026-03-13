@@ -219,114 +219,134 @@ class SportsTradingBot:
 
     def compute_probabilities(self, contracts: list[SportsContract]
                                ) -> list[tuple[SportsContract, float]]:
-        """Compute model probabilities for each contract.
+        """Compute model probabilities using a two-pass approach.
 
-        Pre-filters contracts to tradeable price range before fetching
-        stats, and batch-prefetches unique player/team stats to minimize
-        API calls (balldontlie.io has a 60 req/min rate limit).
+        Pass 1 (instant, no API calls):
+          Compute base probabilities for ALL contracts using fallback
+          models. This uses threshold-based estimates for player props
+          and neutral priors for game outcomes.
+
+        Pass 2 (targeted API calls):
+          Screen for NBA contracts showing >= 3% base edge. Only fetch
+          real stats from balldontlie for those few candidates (~5-15).
+          Recompute their probabilities with actual player/team data.
+
+        This keeps API usage minimal (typically < 30 calls per cycle)
+        while still validating trades with real stats before execution.
 
         Returns list of (contract, model_probability) tuples.
         """
-        stats_api_available = self.nba_stats.available
-
-        # Step 1: Split into NBA contracts needing stats vs others
-        nba_tradeable = []
-        non_nba_results = []
-
+        # ── Pass 1: Base probabilities (no API calls) ──
+        base_results = []
         for contract in contracts:
-            # Non-NBA contracts don't need balldontlie — compute immediately
-            if contract.sport != "nba":
-                try:
-                    prob = self._compute_single_probability(
-                        contract, stats_api_available=False,
-                    )
-                    non_nba_results.append((contract, prob))
-                except Exception as e:
-                    log.debug(f"Failed to compute prob for {contract.ticker}: {e}")
-                    non_nba_results.append((contract, 0.5))
-                continue
-
-            # Pre-filter NBA: skip contracts outside tradeable price range
-            if not (0.20 <= contract.yes_price <= 0.80):
-                non_nba_results.append((contract, 0.5))
-                continue
-
-            nba_tradeable.append(contract)
-
-        log.info(f"  Pre-filtered: {len(nba_tradeable)} NBA contracts in "
-                 f"tradeable range, {len(non_nba_results)} others (no stats needed)")
-
-        # Step 2: Batch-prefetch unique NBA players and teams
-        # Circuit breaker: if first 2 lookups fail, API is down — skip rest
-        if stats_api_available and nba_tradeable:
-            unique_players = set()
-            unique_teams = set()
-            for c in nba_tradeable:
-                if c.contract_type == "player_prop" and c.player_name:
-                    unique_players.add(c.player_name)
-                if c.team_a:
-                    unique_teams.add(c.team_a)
-                if c.team_b:
-                    unique_teams.add(c.team_b)
-
-            log.info(f"  Prefetching stats: {len(unique_players)} players, "
-                     f"{len(unique_teams)} teams")
-
-            consecutive_failures = 0
-            fetched_players = 0
-            for name in unique_players:
-                if consecutive_failures >= 2:
-                    log.warning(f"  Circuit breaker: API down after {fetched_players} "
-                                f"players. Skipping remaining {len(unique_players) - fetched_players} "
-                                f"players — using fallback models.")
-                    stats_api_available = False
-                    break
-                try:
-                    result = self.nba_stats.get_player_stats(name)
-                    if result:
-                        consecutive_failures = 0
-                        fetched_players += 1
-                    else:
-                        consecutive_failures += 1
-                except Exception as e:
-                    log.debug(f"  Prefetch failed for player {name}: {e}")
-                    consecutive_failures += 1
-
-            if stats_api_available:
-                consecutive_failures = 0
-                fetched_teams = 0
-                for name in unique_teams:
-                    if consecutive_failures >= 2:
-                        log.warning(f"  Circuit breaker: API down for team stats. "
-                                    f"Using fallback models for remaining teams.")
-                        stats_api_available = False
-                        break
-                    try:
-                        result = self.nba_stats.get_team_stats(name)
-                        if result:
-                            consecutive_failures = 0
-                            fetched_teams += 1
-                        else:
-                            consecutive_failures += 1
-                    except Exception as e:
-                        log.debug(f"  Prefetch failed for team {name}: {e}")
-                        consecutive_failures += 1
-
-            log.info(f"  Stats prefetch complete: {fetched_players} players cached")
-
-        # Step 3: Compute probabilities for NBA contracts (cache hits, no API calls)
-        nba_results = []
-        for contract in nba_tradeable:
             try:
                 prob = self._compute_single_probability(
-                    contract, stats_api_available,
+                    contract, stats_available=False,
                 )
-                nba_results.append((contract, prob))
+                base_results.append((contract, prob))
             except Exception as e:
-                log.debug(f"Failed to compute prob for {contract.ticker}: {e}")
-                nba_results.append((contract, 0.5))
+                log.debug(f"Base prob failed for {contract.ticker}: {e}")
+                base_results.append((contract, 0.5))
 
-        return non_nba_results + nba_results
+        # ── Screen: Find NBA candidates with base edge >= 3% ──
+        SCREEN_EDGE = 0.03  # Lower than trade threshold (5%) to catch near-misses
+        nba_candidates = []
+        final_results = []
+
+        for contract, base_prob in base_results:
+            if contract.sport != "nba":
+                final_results.append((contract, base_prob))
+                continue
+
+            # Check if base model shows potential edge
+            market = contract.yes_price
+            if market <= 0 or market >= 1:
+                final_results.append((contract, base_prob))
+                continue
+
+            yes_edge = base_prob - market
+            no_edge = market - base_prob
+            best_edge = max(yes_edge, no_edge)
+
+            if best_edge >= SCREEN_EDGE and 0.20 <= market <= 0.80:
+                nba_candidates.append((contract, base_prob))
+            else:
+                final_results.append((contract, base_prob))
+
+        log.info(f"  Pass 1 complete: {len(base_results)} base probs computed, "
+                 f"{len(nba_candidates)} NBA candidates with >= {SCREEN_EDGE:.0%} base edge")
+
+        if not nba_candidates or not self.nba_stats.available:
+            # No candidates or no API — use base probs as-is
+            final_results.extend(nba_candidates)
+            return final_results
+
+        # ── Pass 2: Validate candidates with real stats ──
+        # Collect unique players/teams from candidates only
+        unique_players = set()
+        unique_teams = set()
+        for contract, _ in nba_candidates:
+            if contract.contract_type == "player_prop" and contract.player_name:
+                unique_players.add(contract.player_name)
+            if contract.team_a:
+                unique_teams.add(contract.team_a)
+            if contract.team_b:
+                unique_teams.add(contract.team_b)
+
+        log.info(f"  Pass 2: Fetching stats for {len(unique_players)} players, "
+                 f"{len(unique_teams)} teams (from {len(nba_candidates)} candidates)")
+
+        # Fetch with circuit breaker
+        consecutive_failures = 0
+        fetched = 0
+        api_ok = True
+
+        for name in unique_players:
+            if consecutive_failures >= 2:
+                log.warning(f"  Circuit breaker: API down after {fetched} lookups. "
+                            f"Using base probs for remaining candidates.")
+                api_ok = False
+                break
+            try:
+                result = self.nba_stats.get_player_stats(name)
+                if result:
+                    consecutive_failures = 0
+                    fetched += 1
+                else:
+                    consecutive_failures += 1
+            except Exception:
+                consecutive_failures += 1
+
+        if api_ok:
+            for name in unique_teams:
+                if consecutive_failures >= 2:
+                    log.warning(f"  Circuit breaker: API down for team stats.")
+                    api_ok = False
+                    break
+                try:
+                    result = self.nba_stats.get_team_stats(name)
+                    if result:
+                        consecutive_failures = 0
+                        fetched += 1
+                    else:
+                        consecutive_failures += 1
+                except Exception:
+                    consecutive_failures += 1
+
+        log.info(f"  Pass 2 complete: {fetched} stats fetched")
+
+        # Recompute probabilities for candidates with real stats
+        for contract, base_prob in nba_candidates:
+            try:
+                validated_prob = self._compute_single_probability(
+                    contract, stats_available=api_ok,
+                )
+                final_results.append((contract, validated_prob))
+            except Exception as e:
+                log.debug(f"Validated prob failed for {contract.ticker}: {e}")
+                final_results.append((contract, base_prob))
+
+        return final_results
 
     def _compute_single_probability(self, contract: SportsContract,
                                      stats_available: bool) -> float:
