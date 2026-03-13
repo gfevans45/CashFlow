@@ -259,6 +259,13 @@ class KalshiSportsClient(KalshiWeatherClient):
                     seen.add(ticker)
                     unique.append(event)
 
+            # Log categories for debugging
+            categories = {}
+            for event in unique:
+                cat = event.get("category", "unknown")
+                categories[cat] = categories.get(cat, 0) + 1
+            log.info(f"Kalshi event categories: {dict(sorted(categories.items(), key=lambda x: -x[1]))}")
+
             # Filter for sports
             sports_events = []
             for event in unique:
@@ -281,17 +288,29 @@ class KalshiSportsClient(KalshiWeatherClient):
         sub_title = event.get("sub_title", "").lower()
         text = f"{title} {sub_title}"
 
-        # Category check
-        if category in ("sports", "nba", "ncaa", "nfl", "mlb", "tennis", "soccer"):
+        # Category check (Kalshi uses these category strings)
+        sports_categories = {
+            "sports", "nba", "ncaa", "nfl", "mlb", "tennis", "soccer",
+            "sports & gaming",
+        }
+        if category in sports_categories:
             return True
 
-        # Ticker prefix check
+        # Ticker prefix check (most reliable)
         if any(ticker.startswith(p) for p in _SPORTS_TICKER_PREFIXES):
             return True
 
-        # Keyword check
+        # Keyword check — require at least 2 keyword hits to reduce false positives
+        # on events like "Will Britain win..." or "Johnny Depp casted..."
         for sport, keywords in _SPORT_KEYWORDS.items():
-            if any(kw in text for kw in keywords):
+            hits = sum(1 for kw in keywords if kw in text)
+            if hits >= 2:
+                return True
+            # Single hit OK for very specific keywords (league names)
+            specific = {"nba", "ncaa", "nfl", "mlb", "atp", "wta",
+                        "premier league", "la liga", "champions league",
+                        "march madness", "mls"}
+            if hits == 1 and any(kw in text for kw in specific):
                 return True
 
         return False
@@ -323,18 +342,26 @@ class KalshiSportsClient(KalshiWeatherClient):
 
         # Parse into structured objects
         parsed = []
+        skipped_no_price = 0
+        skipped_parlay = 0
         for m in raw_markets:
             contract = self._parse_sports_market(m)
             if contract is None:
                 continue
+            # Filter out contracts with no price data
+            if contract.yes_price <= 0:
+                skipped_no_price += 1
+                continue
             # Filter out multi-leg parlays (title contains "AND" or multiple bets)
             if self._is_parlay(contract):
+                skipped_parlay += 1
                 continue
             if sport_filter and contract.sport != sport_filter.lower():
                 continue
             parsed.append(contract)
 
-        log.info(f"Found {len(parsed)} single-outcome sports contracts")
+        log.info(f"Found {len(parsed)} tradeable sports contracts "
+                 f"(skipped {skipped_no_price} no-price, {skipped_parlay} parlays)")
         return parsed
 
     def _fetch_sports_markets(self, event_ticker: str = None) -> list:
