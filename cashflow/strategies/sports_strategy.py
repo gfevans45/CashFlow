@@ -723,8 +723,9 @@ class SportsStrategy:
             log.info("Max positions reached, no new trades")
             return []
 
-        # Check total exposure limit
-        max_exposure = capital * self.max_exposure_pct
+        # Check total exposure limit (based on total equity, not just cash)
+        total_equity = capital + open_exposure
+        max_exposure = total_equity * self.max_exposure_pct
         remaining_exposure = max_exposure - open_exposure
         if remaining_exposure <= 0:
             log.info(f"Max exposure reached (${open_exposure:.2f}/{max_exposure:.2f}), no new trades")

@@ -914,7 +914,8 @@ class SportsTradingBot:
         # Exposure tracking
         open_trades = self.state.get("open_trades", [])
         open_exposure = sum(t.get("stake", 0) for t in open_trades)
-        max_exposure = self.capital * self.strategy.max_exposure_pct
+        total_equity = self.capital + open_exposure
+        max_exposure = total_equity * self.strategy.max_exposure_pct
 
         # Performance metrics
         initial_capital = self.state.get("initial_capital", 100.0)
