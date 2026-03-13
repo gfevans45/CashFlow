@@ -1,0 +1,37 @@
+[Unit]
+Description=CashFlow Sports Trading Bot for Kalshi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cashflow
+Group=cashflow
+WorkingDirectory=/opt/cashflow
+ExecStart=/opt/cashflow/.venv/bin/python run_live_sports.py
+Restart=on-failure
+RestartSec=60
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+# Environment
+EnvironmentFile=/opt/cashflow/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cashflow/data
+PrivateTmp=true
+
+# Graceful shutdown
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cashflow-sports
+
+[Install]
+WantedBy=multi-user.target
