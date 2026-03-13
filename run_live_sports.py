@@ -70,9 +70,12 @@ log = logging.getLogger("cashflow.sports")
 STATE_FILE = Path("data/sports_state.json")
 ET = ZoneInfo("America/New_York")
 
-# Schedule times (Eastern) — scan at 10 AM before games
-SCAN_HOUR = 10
-SCAN_MINUTE = 0
+# Scan interval (minutes) — sports odds change frequently
+SCAN_INTERVAL_MINUTES = 5
+
+# Active hours (Eastern) — only scan when games might be listed
+ACTIVE_START_HOUR = 9   # 9 AM ET
+ACTIVE_END_HOUR = 23    # 11 PM ET
 
 # Supported sports
 SUPPORTED_SPORTS = ["nba", "ncaa", "mlb", "tennis", "soccer"]
@@ -589,21 +592,26 @@ class SportsTradingBot:
 # Scheduling helpers
 # ---------------------------------------------------------------------------
 
-def _time_until_next_run(target_hour: int, target_minute: int) -> float:
-    """Calculate seconds until the next target time (Eastern)."""
+def _is_active_hours() -> bool:
+    """Check if we're within active scanning hours (Eastern)."""
     now = datetime.now(ET)
-    target = now.replace(hour=target_hour, minute=target_minute,
-                         second=0, microsecond=0)
+    return ACTIVE_START_HOUR <= now.hour < ACTIVE_END_HOUR
 
-    if now >= target:
-        target += timedelta(days=1)
 
-    # Skip weekends (most sports markets don't run weekends in off-season,
-    # but NBA plays weekends — keep them but skip Mon-Fri logic for now)
-    # Actually NBA plays every day, so no weekend skip needed.
-
-    delta = (target - now).total_seconds()
-    return max(0, delta)
+def _seconds_until_active() -> float:
+    """Seconds until the next active window opens."""
+    now = datetime.now(ET)
+    if now.hour >= ACTIVE_END_HOUR:
+        # Past end — next active is tomorrow morning
+        tomorrow = now + timedelta(days=1)
+        target = tomorrow.replace(hour=ACTIVE_START_HOUR, minute=0,
+                                  second=0, microsecond=0)
+    elif now.hour < ACTIVE_START_HOUR:
+        target = now.replace(hour=ACTIVE_START_HOUR, minute=0,
+                             second=0, microsecond=0)
+    else:
+        return 0  # Already active
+    return max(0, (target - now).total_seconds())
 
 
 # ---------------------------------------------------------------------------
@@ -674,7 +682,8 @@ Examples:
     if args.once:
         log.info("  Mode: single run")
     else:
-        log.info(f"  Schedule: daily at {SCAN_HOUR}:{SCAN_MINUTE:02d} ET")
+        log.info(f"  Schedule: every {SCAN_INTERVAL_MINUTES} min, "
+                 f"{ACTIVE_START_HOUR}:00-{ACTIVE_END_HOUR}:00 ET")
     log.info("=" * 60)
 
     if args.live:
@@ -707,33 +716,51 @@ Examples:
         _print_session_summary(bot)
         return
 
-    # Long-running service mode
-    log.info("Starting daily schedule loop. Press Ctrl+C to stop.")
+    # Long-running service mode — scan every N minutes during active hours
+    log.info(f"Starting scan loop: every {SCAN_INTERVAL_MINUTES} min, "
+             f"{ACTIVE_START_HOUR}:00-{ACTIVE_END_HOUR}:00 ET. Ctrl+C to stop.")
+
+    scan_interval_sec = SCAN_INTERVAL_MINUTES * 60
 
     while _running:
         try:
-            wait_seconds = _time_until_next_run(SCAN_HOUR, SCAN_MINUTE)
+            # Wait until active hours if outside window
+            if not _is_active_hours():
+                wait = _seconds_until_active()
+                resume_time = datetime.now(ET) + timedelta(seconds=wait)
+                log.info(f"Outside active hours. Sleeping until "
+                         f"{resume_time.strftime('%Y-%m-%d %H:%M ET')} "
+                         f"({wait / 3600:.1f} hours)")
+                slept = 0
+                while slept < wait and _running:
+                    chunk = min(30, wait - slept)
+                    time.sleep(chunk)
+                    slept += chunk
+                if not _running:
+                    break
+                continue  # Re-check active hours
 
-            if wait_seconds > 60:
-                next_run = datetime.now(ET) + timedelta(seconds=wait_seconds)
-                log.info(f"Next run: {next_run.strftime('%Y-%m-%d %H:%M ET')} "
-                         f"(in {wait_seconds / 3600:.1f} hours)")
-
-            # Sleep in short increments for responsive shutdown
-            slept = 0
-            while slept < wait_seconds and _running:
-                chunk = min(30, wait_seconds - slept)
-                time.sleep(chunk)
-                slept += chunk
+            # Run a scan cycle
+            bot.run_daily_cycle()
 
             if not _running:
                 break
 
-            bot.run_daily_cycle()
+            # Sleep until next scan
+            next_scan = datetime.now(ET) + timedelta(seconds=scan_interval_sec)
+            log.info(f"Next scan: {next_scan.strftime('%H:%M ET')} "
+                     f"(in {SCAN_INTERVAL_MINUTES} min)")
+
+            slept = 0
+            while slept < scan_interval_sec and _running:
+                chunk = min(30, scan_interval_sec - slept)
+                time.sleep(chunk)
+                slept += chunk
 
         except Exception as e:
-            log.error(f"Daily cycle failed: {e}", exc_info=True)
-            for _ in range(30):
+            log.error(f"Scan cycle failed: {e}", exc_info=True)
+            # Short backoff before retrying
+            for _ in range(6):
                 if not _running:
                     break
                 time.sleep(10)
