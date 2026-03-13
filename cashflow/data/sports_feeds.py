@@ -827,7 +827,7 @@ class NBAStatsClient:
                 if resp.status_code == 200:
                     return resp.json()
                 elif resp.status_code == 429:
-                    backoff = 15 * (attempt + 1)  # 15s, 30s, 45s
+                    backoff = 5 * (attempt + 1)  # 5s, 10s, 15s
                     log.warning(f"balldontlie rate limited, retrying in {backoff}s "
                                 f"(attempt {attempt + 1}/{max_retries})")
                     time.sleep(backoff)

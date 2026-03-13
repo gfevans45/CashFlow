@@ -257,6 +257,7 @@ class SportsTradingBot:
                  f"tradeable range, {len(non_nba_results)} others (no stats needed)")
 
         # Step 2: Batch-prefetch unique NBA players and teams
+        # Circuit breaker: if first 2 lookups fail, API is down — skip rest
         if stats_api_available and nba_tradeable:
             unique_players = set()
             unique_teams = set()
@@ -271,19 +272,47 @@ class SportsTradingBot:
             log.info(f"  Prefetching stats: {len(unique_players)} players, "
                      f"{len(unique_teams)} teams")
 
+            consecutive_failures = 0
+            fetched_players = 0
             for name in unique_players:
+                if consecutive_failures >= 2:
+                    log.warning(f"  Circuit breaker: API down after {fetched_players} "
+                                f"players. Skipping remaining {len(unique_players) - fetched_players} "
+                                f"players — using fallback models.")
+                    stats_api_available = False
+                    break
                 try:
-                    self.nba_stats.get_player_stats(name)
+                    result = self.nba_stats.get_player_stats(name)
+                    if result:
+                        consecutive_failures = 0
+                        fetched_players += 1
+                    else:
+                        consecutive_failures += 1
                 except Exception as e:
                     log.debug(f"  Prefetch failed for player {name}: {e}")
+                    consecutive_failures += 1
 
-            for name in unique_teams:
-                try:
-                    self.nba_stats.get_team_stats(name)
-                except Exception as e:
-                    log.debug(f"  Prefetch failed for team {name}: {e}")
+            if stats_api_available:
+                consecutive_failures = 0
+                fetched_teams = 0
+                for name in unique_teams:
+                    if consecutive_failures >= 2:
+                        log.warning(f"  Circuit breaker: API down for team stats. "
+                                    f"Using fallback models for remaining teams.")
+                        stats_api_available = False
+                        break
+                    try:
+                        result = self.nba_stats.get_team_stats(name)
+                        if result:
+                            consecutive_failures = 0
+                            fetched_teams += 1
+                        else:
+                            consecutive_failures += 1
+                    except Exception as e:
+                        log.debug(f"  Prefetch failed for team {name}: {e}")
+                        consecutive_failures += 1
 
-            log.info("  Stats prefetch complete")
+            log.info(f"  Stats prefetch complete: {fetched_players} players cached")
 
         # Step 3: Compute probabilities for NBA contracts (cache hits, no API calls)
         nba_results = []
